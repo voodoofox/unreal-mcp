@@ -209,6 +209,8 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleGetNiagaraScratchPadScripts(Params);
     if (CommandType == TEXT("create_niagara_hlsl_module"))
         return HandleCreateNiagaraHlslModule(Params);
+    if (CommandType == TEXT("export_niagara_system_spec"))
+        return HandleExportNiagaraSystemSpec(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -3958,5 +3960,233 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraHlslModule
     Result->SetStringField(TEXT("name"), Name);
     Result->SetStringField(TEXT("path"), Script->GetPathName());
     Result->SetNumberField(TEXT("hlsl_length"), Hlsl.Len());
+    return Result;
+}
+
+// --- Helper: serialize all editable UProperties on a UObject ---
+static TArray<TSharedPtr<FJsonValue>> SerializeEditableProperties(UObject* Obj)
+{
+    TArray<TSharedPtr<FJsonValue>> Arr;
+    if (!Obj) return Arr;
+    for (TFieldIterator<FProperty> PropIt(Obj->GetClass()); PropIt; ++PropIt)
+    {
+        FProperty* Prop = *PropIt;
+        if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue;
+        TSharedPtr<FJsonObject> PObj = MakeShared<FJsonObject>();
+        PObj->SetStringField(TEXT("name"), Prop->GetName());
+        PObj->SetStringField(TEXT("type"), Prop->GetCPPType());
+        FString Val;
+        const void* Ptr = Prop->ContainerPtrToValuePtr<void>(Obj);
+        Prop->ExportTextItem_Direct(Val, Ptr, nullptr, Obj, PPF_None);
+        PObj->SetStringField(TEXT("value"), Val);
+        Arr.Add(MakeShared<FJsonValueObject>(PObj));
+    }
+    return Arr;
+}
+
+// --- export_niagara_system_spec: full system serialization ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleExportNiagaraSystemSpec(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    TSharedPtr<FJsonObject> Spec = MakeShared<FJsonObject>();
+    Spec->SetStringField(TEXT("system_name"), System->GetName());
+    Spec->SetStringField(TEXT("system_path"), System->GetPathName());
+    Spec->SetNumberField(TEXT("warmup_time"), System->GetWarmupTime());
+
+    // User parameters
+    TArray<TSharedPtr<FJsonValue>> UserParamsArr;
+    auto ExposedVars = System->GetExposedParameters().ReadParameterVariables();
+    for (int32 vi = 0; vi < ExposedVars.Num(); vi++)
+    {
+        TSharedPtr<FJsonObject> PObj = MakeShared<FJsonObject>();
+        PObj->SetStringField(TEXT("name"), ExposedVars[vi].GetName().ToString());
+        PObj->SetStringField(TEXT("type"), ExposedVars[vi].GetType().GetName());
+        UserParamsArr.Add(MakeShared<FJsonValueObject>(PObj));
+    }
+    Spec->SetArrayField(TEXT("user_parameters"), UserParamsArr);
+
+    // Emitters
+    TArray<TSharedPtr<FJsonValue>> EmittersArr;
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+
+    for (int32 i = 0; i < Handles.Num(); i++)
+    {
+        const FNiagaraEmitterHandle& Handle = Handles[i];
+        FVersionedNiagaraEmitterData* EmData = Handle.GetInstance().GetEmitterData();
+        if (!EmData) continue;
+
+        TSharedPtr<FJsonObject> EmObj = MakeShared<FJsonObject>();
+        EmObj->SetStringField(TEXT("name"), Handle.GetName().ToString());
+        EmObj->SetNumberField(TEXT("index"), i);
+        EmObj->SetBoolField(TEXT("enabled"), Handle.GetIsEnabled());
+        EmObj->SetStringField(TEXT("sim_target"),
+            EmData->SimTarget == ENiagaraSimTarget::CPUSim ? TEXT("CPU") : TEXT("GPU"));
+
+        // Renderers with full properties
+        TArray<TSharedPtr<FJsonValue>> RendArr;
+        for (int32 ri = 0; ri < EmData->GetRenderers().Num(); ri++)
+        {
+            UNiagaraRendererProperties* Rend = EmData->GetRenderers()[ri];
+            TSharedPtr<FJsonObject> RObj = MakeShared<FJsonObject>();
+            RObj->SetStringField(TEXT("type"), RendererTypeToString(Rend));
+            RObj->SetStringField(TEXT("class"), Rend->GetClass()->GetName());
+            RObj->SetBoolField(TEXT("enabled"), Rend->GetIsEnabled());
+            RObj->SetArrayField(TEXT("properties"), SerializeEditableProperties(Rend));
+            RendArr.Add(MakeShared<FJsonValueObject>(RObj));
+        }
+        EmObj->SetArrayField(TEXT("renderers"), RendArr);
+
+        // Modules with script paths
+        TArray<TSharedPtr<FJsonValue>> ModArr;
+        if (UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(EmData->GraphSource))
+        {
+            if (UNiagaraGraph* Graph = Source->NodeGraph)
+            {
+                TArray<UNiagaraNodeFunctionCall*> FuncNodes;
+                Graph->GetNodesOfClass<UNiagaraNodeFunctionCall>(FuncNodes);
+                for (UNiagaraNodeFunctionCall* FuncNode : FuncNodes)
+                {
+                    TSharedPtr<FJsonObject> MObj = MakeShared<FJsonObject>();
+                    MObj->SetStringField(TEXT("name"), FuncNode->GetFunctionName());
+                    MObj->SetBoolField(TEXT("enabled"), FuncNode->IsNodeEnabled());
+                    if (FuncNode->FunctionScript)
+                        MObj->SetStringField(TEXT("script"), FuncNode->FunctionScript->GetPathName());
+                    ModArr.Add(MakeShared<FJsonValueObject>(MObj));
+                }
+            }
+        }
+        EmObj->SetArrayField(TEXT("modules"), ModArr);
+
+        // Rapid iteration parameters (module input overrides)
+        TArray<TSharedPtr<FJsonValue>> RapidArr;
+        TArray<TPair<FString, UNiagaraScript*>> ScriptPairs;
+        ScriptPairs.Add({TEXT("ParticleSpawn"), EmData->SpawnScriptProps.Script});
+        ScriptPairs.Add({TEXT("ParticleUpdate"), EmData->UpdateScriptProps.Script});
+        ScriptPairs.Add({TEXT("EmitterSpawn"), EmData->EmitterSpawnScriptProps.Script});
+        ScriptPairs.Add({TEXT("EmitterUpdate"), EmData->EmitterUpdateScriptProps.Script});
+        for (auto& Pair : ScriptPairs)
+        {
+            if (!Pair.Value) continue;
+            auto RapidVars = Pair.Value->RapidIterationParameters.ReadParameterVariables();
+            for (int32 vi = 0; vi < RapidVars.Num(); vi++)
+            {
+                const FNiagaraVariable& Var = RapidVars[vi];
+                TSharedPtr<FJsonObject> RIObj = MakeShared<FJsonObject>();
+                RIObj->SetStringField(TEXT("stage"), Pair.Key);
+                RIObj->SetStringField(TEXT("name"), Var.GetName().ToString());
+                RIObj->SetStringField(TEXT("type"), Var.GetType().GetName());
+                if (Var.IsDataAllocated())
+                {
+                    FString ValStr;
+                    if (Var.GetType() == FNiagaraTypeDefinition::GetFloatDef())
+                        ValStr = FString::SanitizeFloat(Var.GetValue<float>());
+                    else if (Var.GetType() == FNiagaraTypeDefinition::GetIntDef())
+                        ValStr = FString::FromInt(Var.GetValue<int32>());
+                    else if (Var.GetType() == FNiagaraTypeDefinition::GetBoolDef())
+                        ValStr = Var.GetValue<FNiagaraBool>().GetValue() ? TEXT("true") : TEXT("false");
+                    if (!ValStr.IsEmpty())
+                        RIObj->SetStringField(TEXT("value"), ValStr);
+                }
+                RapidArr.Add(MakeShared<FJsonValueObject>(RIObj));
+            }
+        }
+        EmObj->SetArrayField(TEXT("rapid_iteration_params"), RapidArr);
+
+        // Data interfaces with curve data
+        TArray<TSharedPtr<FJsonValue>> DIsArr;
+        TSet<FString> SeenDIs;
+        TArray<UNiagaraScript*> Scripts;
+        EmData->GetScripts(Scripts, false, false);
+        for (UNiagaraScript* Script : Scripts)
+        {
+            if (!Script) continue;
+            for (const FNiagaraScriptDataInterfaceInfo& Info : Script->GetCachedDefaultDataInterfaces())
+            {
+                if (!Info.DataInterface) continue;
+                FString DIName = Info.Name.ToString();
+                if (SeenDIs.Contains(DIName)) continue;
+                SeenDIs.Add(DIName);
+
+                TSharedPtr<FJsonObject> DObj = MakeShared<FJsonObject>();
+                DObj->SetStringField(TEXT("name"), DIName);
+                DObj->SetStringField(TEXT("class"), Info.DataInterface->GetClass()->GetName());
+
+                // Serialize curve keys for curve DIs
+                if (UNiagaraDataInterfaceCurve* C = Cast<UNiagaraDataInterfaceCurve>(Info.DataInterface))
+                    DObj->SetArrayField(TEXT("curve"), SerializeRichCurveKeys(C->Curve));
+                else if (UNiagaraDataInterfaceVectorCurve* VC = Cast<UNiagaraDataInterfaceVectorCurve>(Info.DataInterface))
+                {
+                    DObj->SetArrayField(TEXT("x_curve"), SerializeRichCurveKeys(VC->XCurve));
+                    DObj->SetArrayField(TEXT("y_curve"), SerializeRichCurveKeys(VC->YCurve));
+                    DObj->SetArrayField(TEXT("z_curve"), SerializeRichCurveKeys(VC->ZCurve));
+                }
+                else if (UNiagaraDataInterfaceColorCurve* CC = Cast<UNiagaraDataInterfaceColorCurve>(Info.DataInterface))
+                {
+                    DObj->SetArrayField(TEXT("red_curve"), SerializeRichCurveKeys(CC->RedCurve));
+                    DObj->SetArrayField(TEXT("green_curve"), SerializeRichCurveKeys(CC->GreenCurve));
+                    DObj->SetArrayField(TEXT("blue_curve"), SerializeRichCurveKeys(CC->BlueCurve));
+                    DObj->SetArrayField(TEXT("alpha_curve"), SerializeRichCurveKeys(CC->AlphaCurve));
+                }
+
+                // Non-curve DIs: serialize editable properties
+                DObj->SetArrayField(TEXT("properties"), SerializeEditableProperties(Info.DataInterface));
+                DIsArr.Add(MakeShared<FJsonValueObject>(DObj));
+            }
+        }
+        EmObj->SetArrayField(TEXT("data_interfaces"), DIsArr);
+
+        // Simulation stages
+        TArray<TSharedPtr<FJsonValue>> StagesArr;
+        for (UNiagaraSimulationStageBase* Stage : EmData->GetSimulationStages())
+        {
+            if (!Stage) continue;
+            TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
+            SObj->SetStringField(TEXT("name"), Stage->SimulationStageName.ToString());
+            SObj->SetBoolField(TEXT("enabled"), Stage->bEnabled);
+            SObj->SetArrayField(TEXT("properties"), SerializeEditableProperties(Stage));
+            StagesArr.Add(MakeShared<FJsonValueObject>(SObj));
+        }
+        EmObj->SetArrayField(TEXT("simulation_stages"), StagesArr);
+
+        // Event handlers
+        TArray<TSharedPtr<FJsonValue>> EventsArr;
+        for (const FNiagaraEventScriptProperties& Evt : EmData->GetEventHandlers())
+        {
+            TSharedPtr<FJsonObject> EObj = MakeShared<FJsonObject>();
+            EObj->SetStringField(TEXT("source_event_name"), Evt.SourceEventName.ToString());
+            EObj->SetStringField(TEXT("source_emitter_id"), Evt.SourceEmitterID.ToString());
+            EObj->SetNumberField(TEXT("max_events_per_frame"), Evt.MaxEventsPerFrame);
+            EObj->SetStringField(TEXT("execution_mode"),
+                Evt.ExecutionMode == EScriptExecutionMode::EveryParticle ? TEXT("EveryParticle") :
+                Evt.ExecutionMode == EScriptExecutionMode::SpawnedParticles ? TEXT("SpawnedParticles") : TEXT("SingleParticle"));
+            if (Evt.Script)
+                EObj->SetStringField(TEXT("usage_id"), Evt.Script->GetUsageId().ToString());
+            EventsArr.Add(MakeShared<FJsonValueObject>(EObj));
+        }
+        EmObj->SetArrayField(TEXT("event_handlers"), EventsArr);
+
+        // Scalability
+        TSharedPtr<FJsonObject> ScalObj = MakeShared<FJsonObject>();
+        const FNiagaraEmitterScalabilitySettings& Scal = EmData->GetScalabilitySettings();
+        ScalObj->SetBoolField(TEXT("scale_spawn_count"), Scal.bScaleSpawnCount);
+        ScalObj->SetNumberField(TEXT("spawn_count_scale"), Scal.SpawnCountScale);
+        EmObj->SetObjectField(TEXT("scalability"), ScalObj);
+
+        EmittersArr.Add(MakeShared<FJsonValueObject>(EmObj));
+    }
+    Spec->SetArrayField(TEXT("emitters"), EmittersArr);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetObjectField(TEXT("spec"), Spec);
     return Result;
 }
