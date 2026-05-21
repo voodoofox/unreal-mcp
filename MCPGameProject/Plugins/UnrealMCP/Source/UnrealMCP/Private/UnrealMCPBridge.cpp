@@ -364,7 +364,8 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("set_niagara_sim_stage_property") ||
                      CommandType == TEXT("add_niagara_event_handler") ||
                      CommandType == TEXT("set_niagara_emitter_sim_target") ||
-                     CommandType == TEXT("remove_niagara_event_handler"))
+                     CommandType == TEXT("remove_niagara_event_handler") ||
+                     CommandType == TEXT("add_niagara_emitter"))
             {
                 ResultJson = Self->NiagaraCommands->HandleCommand(CommandType, Params);
             }

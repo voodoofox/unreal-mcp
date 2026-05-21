@@ -30,6 +30,7 @@
 #include "ViewModels/Stack/NiagaraParameterHandle.h"
 #include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #include "NiagaraTypes.h"
+#include "NiagaraEditorUtilities.h"
 #pragma warning(pop)
 
 #include "AssetToolsModule.h"
@@ -186,6 +187,8 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleSetNiagaraEmitterSimTarget(Params);
     if (CommandType == TEXT("remove_niagara_event_handler"))
         return HandleRemoveNiagaraEventHandler(Params);
+    if (CommandType == TEXT("add_niagara_emitter"))
+        return HandleAddNiagaraEmitter(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -3448,5 +3451,57 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleRemoveNiagaraEventHandl
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("status"), TEXT("success"));
     Result->SetStringField(TEXT("removed_usage_id"), UsageIdStr);
+    return Result;
+}
+
+// --- add_niagara_emitter: add emitter from template or existing asset ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraEmitter(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    FString EmitterPath;
+    if (!Params->TryGetStringField(TEXT("emitter_path"), EmitterPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'emitter_path' - path to source emitter asset"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    UNiagaraEmitter* SourceEmitter = LoadObject<UNiagaraEmitter>(nullptr, *EmitterPath);
+    if (!SourceEmitter)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Emitter not found: %s"), *EmitterPath));
+
+    FGuid EmitterVersion = SourceEmitter->GetExposedVersion().VersionGuid;
+    FGuid NewHandleId = FNiagaraEditorUtilities::AddEmitterToSystem(*System, *SourceEmitter, EmitterVersion);
+
+    if (!NewHandleId.IsValid())
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("AddEmitterToSystem returned invalid handle"));
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    // Find the new emitter's name
+    FString NewEmitterName = TEXT("Unknown");
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    for (const FNiagaraEmitterHandle& Handle : Handles)
+    {
+        if (Handle.GetId() == NewHandleId)
+        {
+            NewEmitterName = Handle.GetName().ToString();
+            break;
+        }
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("emitter_name"), NewEmitterName);
+    Result->SetStringField(TEXT("source_emitter"), EmitterPath);
+    Result->SetNumberField(TEXT("emitter_count"), Handles.Num());
+    Result->SetStringField(TEXT("handle_id"), NewHandleId.ToString());
     return Result;
 }
