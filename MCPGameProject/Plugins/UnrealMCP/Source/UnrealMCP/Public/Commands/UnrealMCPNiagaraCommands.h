@@ -91,4 +91,5 @@ private:
     TSharedPtr<FJsonObject> HandleSetNiagaraScalabilityOverride(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetNiagaraDataChannelInfo(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetNiagaraScratchPadScripts(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleCreateNiagaraHlslModule(const TSharedPtr<FJsonObject>& Params);
 };

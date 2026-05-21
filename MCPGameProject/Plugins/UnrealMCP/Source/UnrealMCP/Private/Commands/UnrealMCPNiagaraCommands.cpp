@@ -31,6 +31,8 @@
 #include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #include "NiagaraTypes.h"
 #include "NiagaraEditorUtilities.h"
+#include "NiagaraScriptFactoryNew.h"
+#include "NiagaraNodeCustomHlsl.h"
 #include "NiagaraEffectType.h"
 #include "NiagaraDataChannelAsset.h"
 #include "NiagaraDataChannel.h"
@@ -205,6 +207,8 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleGetNiagaraDataChannelInfo(Params);
     if (CommandType == TEXT("get_niagara_scratch_pad_scripts"))
         return HandleGetNiagaraScratchPadScripts(Params);
+    if (CommandType == TEXT("create_niagara_hlsl_module"))
+        return HandleCreateNiagaraHlslModule(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -3832,6 +3836,24 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraScratchPadScr
 
     TArray<TSharedPtr<FJsonValue>> AllScripts;
 
+    // Helper: read HLSL from a scratch pad script via reflection
+    auto ReadHlslFromScript = [](UNiagaraScript* Scr, TSharedPtr<FJsonObject>& Obj)
+    {
+        UNiagaraScriptSource* Src = Cast<UNiagaraScriptSource>(Scr->GetLatestSource());
+        if (!Src || !Src->NodeGraph) return;
+        TArray<UNiagaraNodeCustomHlsl*> HlslNodes;
+        Src->NodeGraph->GetNodesOfClass<UNiagaraNodeCustomHlsl>(HlslNodes);
+        for (UNiagaraNodeCustomHlsl* Node : HlslNodes)
+        {
+            FProperty* Prop = Node->GetClass()->FindPropertyByName(TEXT("CustomHlsl"));
+            if (FStrProperty* SP = CastField<FStrProperty>(Prop))
+            {
+                Obj->SetStringField(TEXT("hlsl"), SP->GetPropertyValue(SP->ContainerPtrToValuePtr<void>(Node)));
+                break;
+            }
+        }
+    };
+
     // System-level scratch pad scripts
     for (UNiagaraScript* Script : System->ScratchPadScripts)
     {
@@ -3841,6 +3863,7 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraScratchPadScr
         SObj->SetStringField(TEXT("scope"), TEXT("System"));
         SObj->SetStringField(TEXT("usage"), StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue((int64)Script->GetUsage()));
         SObj->SetStringField(TEXT("path"), Script->GetPathName());
+        ReadHlslFromScript(Script, SObj);
         AllScripts.Add(MakeShared<FJsonValueObject>(SObj));
     }
 
@@ -3864,6 +3887,7 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraScratchPadScr
                 SObj->SetNumberField(TEXT("emitter_index"), i);
                 SObj->SetStringField(TEXT("usage"), StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue((int64)Script->GetUsage()));
                 SObj->SetStringField(TEXT("path"), Script->GetPathName());
+                ReadHlslFromScript(Script, SObj);
                 AllScripts.Add(MakeShared<FJsonValueObject>(SObj));
             }
         }
@@ -3872,5 +3896,67 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraScratchPadScr
 
     Result->SetArrayField(TEXT("scratch_pad_scripts"), AllScripts);
     Result->SetNumberField(TEXT("count"), AllScripts.Num());
+    return Result;
+}
+
+// --- create_niagara_hlsl_module: create a module with custom HLSL ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraHlslModule(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString Name;
+    if (!Params->TryGetStringField(TEXT("name"), Name))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'name'"));
+
+    FString Hlsl;
+    if (!Params->TryGetStringField(TEXT("hlsl"), Hlsl))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'hlsl'"));
+
+    FString PackagePath = TEXT("/Game/VFX/Modules");
+    Params->TryGetStringField(TEXT("package_path"), PackagePath);
+
+    // Create the module script asset via factory
+    UNiagaraModuleScriptFactory* Factory = NewObject<UNiagaraModuleScriptFactory>();
+    IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+    UObject* Created = AssetTools.CreateAsset(Name, PackagePath, UNiagaraScript::StaticClass(), Factory);
+    UNiagaraScript* Script = Cast<UNiagaraScript>(Created);
+    if (!Script)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create module script asset"));
+
+    UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(Script->GetLatestSource());
+    UNiagaraGraph* Graph = Source ? Source->NodeGraph : nullptr;
+    if (!Graph)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("New module has no graph"));
+
+    // Create the Custom HLSL node
+    FGraphNodeCreator<UNiagaraNodeCustomHlsl> Creator(*Graph);
+    UNiagaraNodeCustomHlsl* CustomNode = Creator.CreateNode();
+    Creator.Finalize();
+
+    // Set HLSL via reflection (SetCustomHlsl is not exported)
+    FProperty* HlslProp = CustomNode->GetClass()->FindPropertyByName(TEXT("CustomHlsl"));
+    if (HlslProp)
+    {
+        FStrProperty* StrProp = CastField<FStrProperty>(HlslProp);
+        if (StrProp)
+        {
+            CustomNode->Modify();
+            StrProp->SetPropertyValue(StrProp->ContainerPtrToValuePtr<void>(CustomNode), Hlsl);
+        }
+    }
+
+    // Reconstruct to parse HLSL and auto-generate pins
+    CustomNode->ReconstructNode();
+    CustomNode->PostEditChange();
+    Graph->NotifyGraphChanged();
+
+    Script->MarkPackageDirty();
+    UEditorAssetLibrary::SaveAsset(Script->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("name"), Name);
+    Result->SetStringField(TEXT("path"), Script->GetPathName());
+    Result->SetNumberField(TEXT("hlsl_length"), Hlsl.Len());
     return Result;
 }
