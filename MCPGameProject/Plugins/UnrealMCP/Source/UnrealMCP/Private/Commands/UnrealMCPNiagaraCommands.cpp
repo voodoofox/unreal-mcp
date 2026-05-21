@@ -213,6 +213,8 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleExportNiagaraSystemSpec(Params);
     if (CommandType == TEXT("get_niagara_stateless_emitter_info"))
         return HandleGetNiagaraStatelessEmitterInfo(Params);
+    if (CommandType == TEXT("set_niagara_scratch_pad_hlsl"))
+        return HandleSetNiagaraScratchPadHlsl(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -4291,5 +4293,118 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraStatelessEmit
     }
     Result->SetArrayField(TEXT("renderers"), RendArr);
 
+    return Result;
+}
+
+// --- Helper: find/create CustomHlsl node and set HLSL via reflection ---
+static bool SetHlslOnGraph(UNiagaraGraph* Graph, const FString& Hlsl, bool bCreateIfMissing)
+{
+    if (!Graph) return false;
+
+    TArray<UNiagaraNodeCustomHlsl*> HlslNodes;
+    Graph->GetNodesOfClass<UNiagaraNodeCustomHlsl>(HlslNodes);
+
+    UNiagaraNodeCustomHlsl* TargetNode = nullptr;
+    if (HlslNodes.Num() > 0)
+    {
+        TargetNode = HlslNodes[0];
+    }
+    else if (bCreateIfMissing)
+    {
+        FGraphNodeCreator<UNiagaraNodeCustomHlsl> Creator(*Graph);
+        TargetNode = Creator.CreateNode();
+        Creator.Finalize();
+    }
+
+    if (!TargetNode) return false;
+
+    FProperty* HlslProp = TargetNode->GetClass()->FindPropertyByName(TEXT("CustomHlsl"));
+    if (!HlslProp) return false;
+    FStrProperty* StrProp = CastField<FStrProperty>(HlslProp);
+    if (!StrProp) return false;
+
+    TargetNode->Modify();
+    StrProp->SetPropertyValue(StrProp->ContainerPtrToValuePtr<void>(TargetNode), Hlsl);
+    TargetNode->ReconstructNode();
+    TargetNode->PostEditChange();
+    Graph->NotifyGraphChanged();
+    return true;
+}
+
+// --- set_niagara_scratch_pad_hlsl: write HLSL to a scratch pad script ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraScratchPadHlsl(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    FString ScriptName;
+    if (!Params->TryGetStringField(TEXT("script_name"), ScriptName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'script_name'"));
+
+    FString Hlsl;
+    if (!Params->TryGetStringField(TEXT("hlsl"), Hlsl))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'hlsl'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    // Search system-level scratch pad scripts
+    UNiagaraScript* FoundScript = nullptr;
+    for (UNiagaraScript* Script : System->ScratchPadScripts)
+    {
+        if (Script && Script->GetName() == ScriptName)
+        {
+            FoundScript = Script;
+            break;
+        }
+    }
+
+    // Search per-emitter scratch pad scripts
+    if (!FoundScript)
+    {
+        const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+        for (int32 i = 0; i < Handles.Num() && !FoundScript; i++)
+        {
+            FVersionedNiagaraEmitterData* EmitterData = Handles[i].GetInstance().GetEmitterData();
+            if (!EmitterData) continue;
+#if WITH_EDITORONLY_DATA
+            if (EmitterData->ScratchPads)
+            {
+                for (UNiagaraScript* Script : EmitterData->ScratchPads->Scripts)
+                {
+                    if (Script && Script->GetName() == ScriptName)
+                    {
+                        FoundScript = Script;
+                        break;
+                    }
+                }
+            }
+#endif
+        }
+    }
+
+    if (!FoundScript)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Scratch pad script '%s' not found"), *ScriptName));
+
+    UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(FoundScript->GetLatestSource());
+    if (!Source || !Source->NodeGraph)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Script has no graph"));
+
+    if (!SetHlslOnGraph(Source->NodeGraph, Hlsl, true))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to set HLSL on graph"));
+
+    FoundScript->MarkPackageDirty();
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("script_name"), ScriptName);
+    Result->SetNumberField(TEXT("hlsl_length"), Hlsl.Len());
     return Result;
 }
