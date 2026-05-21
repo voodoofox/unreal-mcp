@@ -72,4 +72,16 @@ private:
     // Ribbon custom vertices
     TSharedPtr<FJsonObject> HandleSetNiagaraCustomVertices(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetNiagaraCustomVertices(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetNiagaraDeepInspect(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetNiagaraCurveData(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNiagaraCurveData(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetNiagaraDIProperties(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNiagaraDIProperty(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddNiagaraSimulationStage(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveNiagaraSimulationStage(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetNiagaraSimStageProperties(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNiagaraSimStageProperty(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddNiagaraEventHandler(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNiagaraEmitterSimTarget(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveNiagaraEventHandler(const TSharedPtr<FJsonObject>& Params);
 };

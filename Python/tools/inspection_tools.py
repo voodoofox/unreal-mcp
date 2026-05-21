@@ -786,4 +786,32 @@ def register_inspection_tools(mcp: FastMCP):
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
+    @async_tool(mcp)
+    def get_niagara_deep_inspect(
+        ctx: Context,
+        system_path: str
+    ) -> Dict[str, Any]:
+        """
+        Deep inspection of a Niagara system - all emitters, modules (with usage/script),
+        renderers, simulation stages, event handlers, data interfaces, and user parameters.
+
+        Args:
+            system_path: Asset path to the Niagara system
+        """
+        from connection_holder import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            response = unreal.send_command("get_niagara_deep_inspect", {
+                "system_path": system_path
+            })
+            if not response:
+                return {"success": False, "message": "No response from Unreal Engine"}
+            return response
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
     logger.info("Inspection tools registered successfully")

@@ -19,8 +19,17 @@
 #include "NiagaraScriptSource.h"
 #include "NiagaraNodeAssignment.h"
 #include "NiagaraNodeInput.h"
+#include "NiagaraSimulationStageBase.h"
+#include "NiagaraScript.h"
+#include "NiagaraDataInterface.h"
+#include "NiagaraDataInterfaceCurve.h"
+#include "NiagaraDataInterfaceVectorCurve.h"
+#include "NiagaraDataInterfaceColorCurve.h"
+#include "NiagaraDataInterfaceVector2DCurve.h"
+#include "NiagaraDataInterfaceVector4Curve.h"
 #include "ViewModels/Stack/NiagaraParameterHandle.h"
 #include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
+#include "NiagaraTypes.h"
 #pragma warning(pop)
 
 #include "AssetToolsModule.h"
@@ -153,6 +162,30 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleSetNiagaraCustomVertices(Params);
     if (CommandType == TEXT("get_niagara_custom_vertices"))
         return HandleGetNiagaraCustomVertices(Params);
+    if (CommandType == TEXT("get_niagara_deep_inspect"))
+        return HandleGetNiagaraDeepInspect(Params);
+    if (CommandType == TEXT("get_niagara_curve_data"))
+        return HandleGetNiagaraCurveData(Params);
+    if (CommandType == TEXT("set_niagara_curve_data"))
+        return HandleSetNiagaraCurveData(Params);
+    if (CommandType == TEXT("get_niagara_di_properties"))
+        return HandleGetNiagaraDIProperties(Params);
+    if (CommandType == TEXT("set_niagara_di_property"))
+        return HandleSetNiagaraDIProperty(Params);
+    if (CommandType == TEXT("add_niagara_simulation_stage"))
+        return HandleAddNiagaraSimulationStage(Params);
+    if (CommandType == TEXT("remove_niagara_simulation_stage"))
+        return HandleRemoveNiagaraSimulationStage(Params);
+    if (CommandType == TEXT("get_niagara_sim_stage_properties"))
+        return HandleGetNiagaraSimStageProperties(Params);
+    if (CommandType == TEXT("set_niagara_sim_stage_property"))
+        return HandleSetNiagaraSimStageProperty(Params);
+    if (CommandType == TEXT("add_niagara_event_handler"))
+        return HandleAddNiagaraEventHandler(Params);
+    if (CommandType == TEXT("set_niagara_emitter_sim_target"))
+        return HandleSetNiagaraEmitterSimTarget(Params);
+    if (CommandType == TEXT("remove_niagara_event_handler"))
+        return HandleRemoveNiagaraEventHandler(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -2451,5 +2484,969 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraModuleOverrid
     Result->SetStringField(TEXT("input"), InputName);
     Result->SetStringField(TEXT("value"), Value);
     Result->SetStringField(TEXT("override_pin"), OverridePin.PinName.ToString());
+    return Result;
+}
+
+// --- get_niagara_deep_inspect ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraDeepInspect(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path' parameter"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Niagara system not found: %s"), *SystemPath));
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("system_name"), System->GetName());
+    Result->SetStringField(TEXT("system_path"), System->GetPathName());
+    Result->SetNumberField(TEXT("warmup_time"), System->GetWarmupTime());
+
+    // User parameters
+    TArray<TSharedPtr<FJsonValue>> UserParamsArray;
+    auto ExposedVars = System->GetExposedParameters().ReadParameterVariables();
+    for (int32 vi = 0; vi < ExposedVars.Num(); vi++)
+    {
+        TSharedPtr<FJsonObject> PObj = MakeShared<FJsonObject>();
+        PObj->SetStringField(TEXT("name"), ExposedVars[vi].GetName().ToString());
+        PObj->SetStringField(TEXT("type"), ExposedVars[vi].GetType().GetName());
+        UserParamsArray.Add(MakeShared<FJsonValueObject>(PObj));
+    }
+    Result->SetArrayField(TEXT("user_parameters"), UserParamsArray);
+
+    // Emitters
+    TArray<TSharedPtr<FJsonValue>> EmitterArray;
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+
+    for (int32 i = 0; i < Handles.Num(); i++)
+    {
+        const FNiagaraEmitterHandle& Handle = Handles[i];
+        FVersionedNiagaraEmitterData* EmitterData = Handle.GetInstance().GetEmitterData();
+        if (!EmitterData) continue;
+
+        TSharedPtr<FJsonObject> EmObj = MakeShared<FJsonObject>();
+        EmObj->SetStringField(TEXT("name"), Handle.GetName().ToString());
+        EmObj->SetNumberField(TEXT("index"), i);
+        EmObj->SetBoolField(TEXT("enabled"), Handle.GetIsEnabled());
+        EmObj->SetStringField(TEXT("sim_target"),
+            EmitterData->SimTarget == ENiagaraSimTarget::CPUSim ? TEXT("CPU") : TEXT("GPU"));
+
+        // Renderers
+        TArray<TSharedPtr<FJsonValue>> RendArray;
+        for (int32 ri = 0; ri < EmitterData->GetRenderers().Num(); ri++)
+        {
+            UNiagaraRendererProperties* Rend = EmitterData->GetRenderers()[ri];
+            TSharedPtr<FJsonObject> RObj = MakeShared<FJsonObject>();
+            RObj->SetNumberField(TEXT("index"), ri);
+            RObj->SetStringField(TEXT("type"), RendererTypeToString(Rend));
+            RObj->SetStringField(TEXT("class"), Rend->GetClass()->GetName());
+            RObj->SetBoolField(TEXT("enabled"), Rend->GetIsEnabled());
+            RendArray.Add(MakeShared<FJsonValueObject>(RObj));
+        }
+        EmObj->SetArrayField(TEXT("renderers"), RendArray);
+
+        // Modules (from the graph)
+        TArray<TSharedPtr<FJsonValue>> ModulesArray;
+        if (UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(EmitterData->GraphSource))
+        {
+            if (UNiagaraGraph* Graph = Source->NodeGraph)
+            {
+                TArray<UNiagaraNodeFunctionCall*> FuncNodes;
+                Graph->GetNodesOfClass<UNiagaraNodeFunctionCall>(FuncNodes);
+                for (UNiagaraNodeFunctionCall* FuncNode : FuncNodes)
+                {
+                    TSharedPtr<FJsonObject> MObj = MakeShared<FJsonObject>();
+                    MObj->SetStringField(TEXT("name"), FuncNode->GetFunctionName());
+                    MObj->SetStringField(TEXT("class"), FuncNode->GetClass()->GetName());
+                    MObj->SetBoolField(TEXT("enabled"), FuncNode->IsNodeEnabled());
+                    if (FuncNode->FunctionScript)
+                    {
+                        MObj->SetStringField(TEXT("script"), FuncNode->FunctionScript->GetPathName());
+                    }
+                    ModulesArray.Add(MakeShared<FJsonValueObject>(MObj));
+                }
+            }
+        }
+        EmObj->SetArrayField(TEXT("modules"), ModulesArray);
+
+        // Simulation Stages
+        TArray<TSharedPtr<FJsonValue>> StagesArray;
+        for (UNiagaraSimulationStageBase* Stage : EmitterData->GetSimulationStages())
+        {
+            if (!Stage) continue;
+            TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
+            SObj->SetStringField(TEXT("name"), Stage->SimulationStageName.ToString());
+            SObj->SetStringField(TEXT("class"), Stage->GetClass()->GetName());
+            SObj->SetBoolField(TEXT("enabled"), Stage->bEnabled);
+            if (UNiagaraSimulationStageGeneric* GenStage = Cast<UNiagaraSimulationStageGeneric>(Stage))
+            {
+                SObj->SetStringField(TEXT("iteration_source"),
+                    GenStage->IterationSource == ENiagaraIterationSource::Particles ? TEXT("Particles") : TEXT("DataInterface"));
+            }
+            StagesArray.Add(MakeShared<FJsonValueObject>(SObj));
+        }
+        EmObj->SetArrayField(TEXT("simulation_stages"), StagesArray);
+
+        // Event Handlers
+        TArray<TSharedPtr<FJsonValue>> EventsArray;
+        for (const FNiagaraEventScriptProperties& EventProps : EmitterData->GetEventHandlers())
+        {
+            TSharedPtr<FJsonObject> EObj = MakeShared<FJsonObject>();
+            EObj->SetStringField(TEXT("source_event_name"), EventProps.SourceEventName.ToString());
+            EObj->SetStringField(TEXT("source_emitter_id"), EventProps.SourceEmitterID.ToString());
+            EObj->SetNumberField(TEXT("max_events_per_frame"), EventProps.MaxEventsPerFrame);
+            EObj->SetStringField(TEXT("execution_mode"),
+                EventProps.ExecutionMode == EScriptExecutionMode::EveryParticle ? TEXT("EveryParticle") :
+                EventProps.ExecutionMode == EScriptExecutionMode::SpawnedParticles ? TEXT("SpawnedParticles") : TEXT("SingleParticle"));
+            if (EventProps.Script)
+                EObj->SetStringField(TEXT("usage_id"), EventProps.Script->GetUsageId().ToString());
+            EventsArray.Add(MakeShared<FJsonValueObject>(EObj));
+        }
+        EmObj->SetArrayField(TEXT("event_handlers"), EventsArray);
+
+        // Data Interfaces (from all scripts)
+        TArray<TSharedPtr<FJsonValue>> DIsArray;
+        TSet<FString> SeenDIs;
+        TArray<UNiagaraScript*> Scripts;
+        EmitterData->GetScripts(Scripts, false, false);
+        for (UNiagaraScript* Script : Scripts)
+        {
+            if (!Script) continue;
+            for (const FNiagaraScriptDataInterfaceInfo& DIInfo : Script->GetCachedDefaultDataInterfaces())
+            {
+                if (!DIInfo.DataInterface) continue;
+                FString DIName = DIInfo.Name.ToString();
+                if (SeenDIs.Contains(DIName)) continue;
+                SeenDIs.Add(DIName);
+
+                TSharedPtr<FJsonObject> DObj = MakeShared<FJsonObject>();
+                DObj->SetStringField(TEXT("name"), DIName);
+                DObj->SetStringField(TEXT("class"), DIInfo.DataInterface->GetClass()->GetName());
+                DIsArray.Add(MakeShared<FJsonValueObject>(DObj));
+            }
+        }
+        EmObj->SetArrayField(TEXT("data_interfaces"), DIsArray);
+
+        EmitterArray.Add(MakeShared<FJsonValueObject>(EmObj));
+    }
+
+    Result->SetArrayField(TEXT("emitters"), EmitterArray);
+    return Result;
+}
+
+// --- Helper: serialize FRichCurve keys to JSON array ---
+static TArray<TSharedPtr<FJsonValue>> SerializeRichCurveKeys(const FRichCurve& Curve)
+{
+    TArray<TSharedPtr<FJsonValue>> KeysArr;
+    for (auto It = Curve.GetKeyIterator(); It; ++It)
+    {
+        TSharedPtr<FJsonObject> KObj = MakeShared<FJsonObject>();
+        KObj->SetNumberField(TEXT("time"), It->Time);
+        KObj->SetNumberField(TEXT("value"), It->Value);
+        FString InterpStr;
+        switch (It->InterpMode)
+        {
+            case RCIM_Linear: InterpStr = TEXT("Linear"); break;
+            case RCIM_Constant: InterpStr = TEXT("Constant"); break;
+            case RCIM_Cubic: InterpStr = TEXT("Cubic"); break;
+            default: InterpStr = TEXT("Unknown"); break;
+        }
+        KObj->SetStringField(TEXT("interp"), InterpStr);
+        KeysArr.Add(MakeShared<FJsonValueObject>(KObj));
+    }
+    return KeysArr;
+}
+
+// --- Helper: find a DI by name from an emitter's scripts ---
+static UNiagaraDataInterface* FindDIByName(FVersionedNiagaraEmitterData* EmitterData, const FString& DIName)
+{
+    if (!EmitterData) return nullptr;
+    TArray<UNiagaraScript*> Scripts;
+    EmitterData->GetScripts(Scripts, false, false);
+    for (UNiagaraScript* Script : Scripts)
+    {
+        if (!Script) continue;
+        for (const FNiagaraScriptDataInterfaceInfo& Info : Script->GetCachedDefaultDataInterfaces())
+        {
+            if (Info.DataInterface && Info.Name.ToString() == DIName)
+                return Info.DataInterface;
+        }
+    }
+    return nullptr;
+}
+
+// --- get_niagara_curve_data ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraCurveData(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString DIName;
+    if (!Params->TryGetStringField(TEXT("di_name"), DIName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'di_name'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    UNiagaraDataInterface* DI = FindDIByName(EmitterData, DIName);
+    if (!DI)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Data interface '%s' not found on emitter %d"), *DIName, EmitterIndex));
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("di_name"), DIName);
+    Result->SetStringField(TEXT("di_class"), DI->GetClass()->GetName());
+
+    if (UNiagaraDataInterfaceCurve* CurveDI = Cast<UNiagaraDataInterfaceCurve>(DI))
+    {
+        Result->SetArrayField(TEXT("curve"), SerializeRichCurveKeys(CurveDI->Curve));
+    }
+    else if (UNiagaraDataInterfaceVectorCurve* VecDI = Cast<UNiagaraDataInterfaceVectorCurve>(DI))
+    {
+        Result->SetArrayField(TEXT("x_curve"), SerializeRichCurveKeys(VecDI->XCurve));
+        Result->SetArrayField(TEXT("y_curve"), SerializeRichCurveKeys(VecDI->YCurve));
+        Result->SetArrayField(TEXT("z_curve"), SerializeRichCurveKeys(VecDI->ZCurve));
+    }
+    else if (UNiagaraDataInterfaceColorCurve* ColDI = Cast<UNiagaraDataInterfaceColorCurve>(DI))
+    {
+        Result->SetArrayField(TEXT("red_curve"), SerializeRichCurveKeys(ColDI->RedCurve));
+        Result->SetArrayField(TEXT("green_curve"), SerializeRichCurveKeys(ColDI->GreenCurve));
+        Result->SetArrayField(TEXT("blue_curve"), SerializeRichCurveKeys(ColDI->BlueCurve));
+        Result->SetArrayField(TEXT("alpha_curve"), SerializeRichCurveKeys(ColDI->AlphaCurve));
+    }
+    else if (UNiagaraDataInterfaceVector2DCurve* Vec2DI = Cast<UNiagaraDataInterfaceVector2DCurve>(DI))
+    {
+        Result->SetArrayField(TEXT("x_curve"), SerializeRichCurveKeys(Vec2DI->XCurve));
+        Result->SetArrayField(TEXT("y_curve"), SerializeRichCurveKeys(Vec2DI->YCurve));
+    }
+    else
+    {
+        Result->SetStringField(TEXT("warning"), TEXT("Not a curve-type DI, no key data available"));
+    }
+
+    return Result;
+}
+
+// --- set_niagara_curve_data ---
+
+static void ParseAndSetCurveKeys(FRichCurve& Curve, const TArray<TSharedPtr<FJsonValue>>& KeysJson)
+{
+    Curve.Reset();
+    for (const TSharedPtr<FJsonValue>& KeyVal : KeysJson)
+    {
+        const TSharedPtr<FJsonObject>& KeyObj = KeyVal->AsObject();
+        if (!KeyObj.IsValid()) continue;
+        double Time = 0.0, Value = 0.0;
+        KeyObj->TryGetNumberField(TEXT("time"), Time);
+        KeyObj->TryGetNumberField(TEXT("value"), Value);
+        FKeyHandle Handle = Curve.AddKey((float)Time, (float)Value);
+
+        FString Interp;
+        if (KeyObj->TryGetStringField(TEXT("interp"), Interp))
+        {
+            ERichCurveInterpMode Mode = RCIM_Cubic;
+            if (Interp == TEXT("Linear")) Mode = RCIM_Linear;
+            else if (Interp == TEXT("Constant")) Mode = RCIM_Constant;
+            Curve.SetKeyInterpMode(Handle, Mode);
+        }
+    }
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraCurveData(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString DIName;
+    if (!Params->TryGetStringField(TEXT("di_name"), DIName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'di_name'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    UNiagaraDataInterface* DI = FindDIByName(EmitterData, DIName);
+    if (!DI)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Data interface '%s' not found"), *DIName));
+
+    DI->Modify();
+    int32 KeysSet = 0;
+
+    if (UNiagaraDataInterfaceCurve* CurveDI = Cast<UNiagaraDataInterfaceCurve>(DI))
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
+        if (Params->TryGetArrayField(TEXT("curve"), Keys))
+        {
+            ParseAndSetCurveKeys(CurveDI->Curve, *Keys);
+            KeysSet = Keys->Num();
+        }
+    }
+    else if (UNiagaraDataInterfaceVectorCurve* VecDI = Cast<UNiagaraDataInterfaceVectorCurve>(DI))
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
+        if (Params->TryGetArrayField(TEXT("x_curve"), Keys)) { ParseAndSetCurveKeys(VecDI->XCurve, *Keys); KeysSet += Keys->Num(); }
+        if (Params->TryGetArrayField(TEXT("y_curve"), Keys)) { ParseAndSetCurveKeys(VecDI->YCurve, *Keys); KeysSet += Keys->Num(); }
+        if (Params->TryGetArrayField(TEXT("z_curve"), Keys)) { ParseAndSetCurveKeys(VecDI->ZCurve, *Keys); KeysSet += Keys->Num(); }
+    }
+    else if (UNiagaraDataInterfaceColorCurve* ColDI = Cast<UNiagaraDataInterfaceColorCurve>(DI))
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
+        if (Params->TryGetArrayField(TEXT("red_curve"), Keys)) { ParseAndSetCurveKeys(ColDI->RedCurve, *Keys); KeysSet += Keys->Num(); }
+        if (Params->TryGetArrayField(TEXT("green_curve"), Keys)) { ParseAndSetCurveKeys(ColDI->GreenCurve, *Keys); KeysSet += Keys->Num(); }
+        if (Params->TryGetArrayField(TEXT("blue_curve"), Keys)) { ParseAndSetCurveKeys(ColDI->BlueCurve, *Keys); KeysSet += Keys->Num(); }
+        if (Params->TryGetArrayField(TEXT("alpha_curve"), Keys)) { ParseAndSetCurveKeys(ColDI->AlphaCurve, *Keys); KeysSet += Keys->Num(); }
+    }
+    else if (UNiagaraDataInterfaceVector2DCurve* Vec2DI = Cast<UNiagaraDataInterfaceVector2DCurve>(DI))
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Keys = nullptr;
+        if (Params->TryGetArrayField(TEXT("x_curve"), Keys)) { ParseAndSetCurveKeys(Vec2DI->XCurve, *Keys); KeysSet += Keys->Num(); }
+        if (Params->TryGetArrayField(TEXT("y_curve"), Keys)) { ParseAndSetCurveKeys(Vec2DI->YCurve, *Keys); KeysSet += Keys->Num(); }
+    }
+    else
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Not a supported curve-type DI"));
+    }
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("di_name"), DIName);
+    Result->SetNumberField(TEXT("keys_set"), KeysSet);
+    return Result;
+}
+
+// --- get_niagara_di_properties: generic reflection-based DI property reader ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraDIProperties(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString DIName;
+    if (!Params->TryGetStringField(TEXT("di_name"), DIName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'di_name'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    UNiagaraDataInterface* DI = FindDIByName(EmitterData, DIName);
+    if (!DI)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Data interface '%s' not found"), *DIName));
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("di_name"), DIName);
+    Result->SetStringField(TEXT("di_class"), DI->GetClass()->GetName());
+
+    TArray<TSharedPtr<FJsonValue>> PropsArray;
+    for (TFieldIterator<FProperty> PropIt(DI->GetClass()); PropIt; ++PropIt)
+    {
+        FProperty* Prop = *PropIt;
+        if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue;
+
+        TSharedPtr<FJsonObject> PObj = MakeShared<FJsonObject>();
+        PObj->SetStringField(TEXT("name"), Prop->GetName());
+        PObj->SetStringField(TEXT("type"), Prop->GetCPPType());
+        PObj->SetStringField(TEXT("category"), Prop->GetMetaData(TEXT("Category")));
+
+        FString ValueStr;
+        const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(DI);
+        Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, DI, PPF_None);
+        PObj->SetStringField(TEXT("value"), ValueStr);
+
+        PropsArray.Add(MakeShared<FJsonValueObject>(PObj));
+    }
+    Result->SetArrayField(TEXT("properties"), PropsArray);
+
+    return Result;
+}
+
+// --- set_niagara_di_property: generic reflection-based DI property writer ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraDIProperty(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString DIName;
+    if (!Params->TryGetStringField(TEXT("di_name"), DIName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'di_name'"));
+
+    FString PropertyName;
+    if (!Params->TryGetStringField(TEXT("property_name"), PropertyName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'property_name'"));
+
+    FString PropertyValue;
+    if (!Params->TryGetStringField(TEXT("property_value"), PropertyValue))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'property_value'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    UNiagaraDataInterface* DI = FindDIByName(EmitterData, DIName);
+    if (!DI)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Data interface '%s' not found"), *DIName));
+
+    FProperty* Prop = DI->GetClass()->FindPropertyByName(*PropertyName);
+    if (!Prop)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Property '%s' not found on %s"), *PropertyName, *DI->GetClass()->GetName()));
+
+    DI->Modify();
+    void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(DI);
+
+    // Handle object references (material paths etc.)
+    FString InputText = PropertyValue;
+    if (FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+    {
+        if (!InputText.Contains(TEXT("'")) && (InputText.StartsWith(TEXT("/Game")) || InputText.StartsWith(TEXT("/Engine"))))
+        {
+            UObject* Loaded = LoadObject<UObject>(nullptr, *InputText);
+            if (Loaded)
+                InputText = FString::Printf(TEXT("%s'%s'"), *Loaded->GetClass()->GetName(), *Loaded->GetPathName());
+        }
+    }
+
+    const TCHAR* ImportResult = Prop->ImportText_Direct(*InputText, ValuePtr, DI, PPF_None);
+    if (!ImportResult)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to set '%s' to '%s'"), *PropertyName, *PropertyValue));
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("di_name"), DIName);
+    Result->SetStringField(TEXT("property"), PropertyName);
+    Result->SetStringField(TEXT("value"), PropertyValue);
+    return Result;
+}
+
+// --- Helper: get ScriptSource and Graph from emitter ---
+static bool GetEmitterSourceAndGraph(FVersionedNiagaraEmitterData* EmitterData, UNiagaraScriptSource*& OutSource, UNiagaraGraph*& OutGraph)
+{
+    OutSource = Cast<UNiagaraScriptSource>(EmitterData->GraphSource);
+    if (!OutSource) return false;
+    OutGraph = OutSource->NodeGraph;
+    return OutGraph != nullptr;
+}
+
+// --- Helper: create output+input nodes for a new script usage (replicates ResetGraphForOutput) ---
+static void SetupGraphForNewScript(UNiagaraGraph& Graph, ENiagaraScriptUsage Usage, FGuid UsageId)
+{
+    Graph.Modify();
+
+    FGraphNodeCreator<UNiagaraNodeOutput> OutputCreator(Graph);
+    UNiagaraNodeOutput* OutputNode = OutputCreator.CreateNode();
+    OutputNode->SetUsage(Usage);
+    OutputNode->SetUsageId(UsageId);
+    OutputNode->Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("Out")));
+    OutputCreator.Finalize();
+
+    FGraphNodeCreator<UNiagaraNodeInput> InputCreator(Graph);
+    UNiagaraNodeInput* InputNode = InputCreator.CreateNode();
+    InputNode->Input = FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("InputMap"));
+    InputNode->Usage = ENiagaraInputNodeUsage::Parameter;
+    InputCreator.Finalize();
+
+    UEdGraphPin* OutInputPin = OutputNode->Pins.Num() > 0 ? OutputNode->Pins[0] : nullptr;
+    UEdGraphPin* InOutputPin = InputNode->Pins.Num() > 0 ? InputNode->Pins[0] : nullptr;
+    if (OutInputPin && InOutputPin)
+    {
+        OutInputPin->BreakAllPinLinks();
+        OutInputPin->MakeLinkTo(InOutputPin);
+    }
+}
+
+// --- add_niagara_simulation_stage ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraSimulationStage(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString StageName = TEXT("NewSimStage");
+    Params->TryGetStringField(TEXT("stage_name"), StageName);
+
+    FString IterSource = TEXT("Particles");
+    Params->TryGetStringField(TEXT("iteration_source"), IterSource);
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitter VerEmitter = Handles[EmitterIndex].GetInstance();
+    FVersionedNiagaraEmitterData* EmitterData = VerEmitter.GetEmitterData();
+    UNiagaraEmitter* Emitter = VerEmitter.Emitter;
+    if (!Emitter || !EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter"));
+
+    UNiagaraScriptSource* Source = nullptr;
+    UNiagaraGraph* Graph = nullptr;
+    if (!GetEmitterSourceAndGraph(EmitterData, Source, Graph))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No script source/graph on emitter"));
+
+    Emitter->Modify();
+
+    FGuid StageUsageId = FGuid::NewGuid();
+
+    UNiagaraSimulationStageGeneric* NewStage = NewObject<UNiagaraSimulationStageGeneric>(
+        Emitter, NAME_None, RF_Transactional);
+    NewStage->SimulationStageName = *StageName;
+    NewStage->bEnabled = true;
+    if (IterSource == TEXT("DataInterface"))
+        NewStage->IterationSource = ENiagaraIterationSource::DataInterface;
+    else
+        NewStage->IterationSource = ENiagaraIterationSource::Particles;
+
+    NewStage->Script = NewObject<UNiagaraScript>(
+        NewStage,
+        MakeUniqueObjectName(NewStage, UNiagaraScript::StaticClass(), TEXT("SimulationStage")),
+        RF_Transactional);
+    NewStage->Script->SetUsage(ENiagaraScriptUsage::ParticleSimulationStageScript);
+    NewStage->Script->SetUsageId(StageUsageId);
+    NewStage->Script->SetLatestSource(Source);
+
+    Emitter->AddSimulationStage(NewStage, VerEmitter.Version);
+    SetupGraphForNewScript(*Graph, ENiagaraScriptUsage::ParticleSimulationStageScript, StageUsageId);
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("stage_name"), StageName);
+    Result->SetStringField(TEXT("iteration_source"), IterSource);
+    Result->SetNumberField(TEXT("emitter_index"), EmitterIndex);
+    return Result;
+}
+
+// --- remove_niagara_simulation_stage ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleRemoveNiagaraSimulationStage(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString StageName;
+    if (!Params->TryGetStringField(TEXT("stage_name"), StageName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'stage_name'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitter VerEmitter = Handles[EmitterIndex].GetInstance();
+    FVersionedNiagaraEmitterData* EmitterData = VerEmitter.GetEmitterData();
+    UNiagaraEmitter* Emitter = VerEmitter.Emitter;
+    if (!Emitter || !EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter data"));
+
+    UNiagaraSimulationStageBase* FoundStage = nullptr;
+    for (UNiagaraSimulationStageBase* Stage : EmitterData->GetSimulationStages())
+    {
+        if (Stage && Stage->SimulationStageName.ToString() == StageName)
+        {
+            FoundStage = Stage;
+            break;
+        }
+    }
+    if (!FoundStage)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Simulation stage '%s' not found"), *StageName));
+
+    Emitter->RemoveSimulationStage(FoundStage, VerEmitter.Version);
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("removed_stage"), StageName);
+    return Result;
+}
+
+// --- get_niagara_sim_stage_properties: reflection-based ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraSimStageProperties(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString StageName;
+    if (!Params->TryGetStringField(TEXT("stage_name"), StageName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'stage_name'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    if (!EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter data"));
+
+    UNiagaraSimulationStageBase* FoundStage = nullptr;
+    for (UNiagaraSimulationStageBase* Stage : EmitterData->GetSimulationStages())
+    {
+        if (Stage && Stage->SimulationStageName.ToString() == StageName)
+        {
+            FoundStage = Stage;
+            break;
+        }
+    }
+    if (!FoundStage)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Simulation stage '%s' not found"), *StageName));
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("stage_name"), StageName);
+    Result->SetStringField(TEXT("class"), FoundStage->GetClass()->GetName());
+
+    TArray<TSharedPtr<FJsonValue>> PropsArray;
+    for (TFieldIterator<FProperty> PropIt(FoundStage->GetClass()); PropIt; ++PropIt)
+    {
+        FProperty* Prop = *PropIt;
+        if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue;
+
+        TSharedPtr<FJsonObject> PObj = MakeShared<FJsonObject>();
+        PObj->SetStringField(TEXT("name"), Prop->GetName());
+        PObj->SetStringField(TEXT("type"), Prop->GetCPPType());
+
+        FString ValueStr;
+        const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(FoundStage);
+        Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, FoundStage, PPF_None);
+        PObj->SetStringField(TEXT("value"), ValueStr);
+
+        PropsArray.Add(MakeShared<FJsonValueObject>(PObj));
+    }
+    Result->SetArrayField(TEXT("properties"), PropsArray);
+    return Result;
+}
+
+// --- set_niagara_sim_stage_property: reflection-based ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraSimStageProperty(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString StageName;
+    if (!Params->TryGetStringField(TEXT("stage_name"), StageName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'stage_name'"));
+
+    FString PropertyName;
+    if (!Params->TryGetStringField(TEXT("property_name"), PropertyName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'property_name'"));
+
+    FString PropertyValue;
+    if (!Params->TryGetStringField(TEXT("property_value"), PropertyValue))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'property_value'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    if (!EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter data"));
+
+    UNiagaraSimulationStageBase* FoundStage = nullptr;
+    for (UNiagaraSimulationStageBase* Stage : EmitterData->GetSimulationStages())
+    {
+        if (Stage && Stage->SimulationStageName.ToString() == StageName)
+        {
+            FoundStage = Stage;
+            break;
+        }
+    }
+    if (!FoundStage)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Simulation stage '%s' not found"), *StageName));
+
+    FProperty* Prop = FoundStage->GetClass()->FindPropertyByName(*PropertyName);
+    if (!Prop)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Property '%s' not found"), *PropertyName));
+
+    FoundStage->Modify();
+    void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(FoundStage);
+    const TCHAR* ImportResult = Prop->ImportText_Direct(*PropertyValue, ValuePtr, FoundStage, PPF_None);
+    if (!ImportResult)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Failed to set '%s' to '%s'"), *PropertyName, *PropertyValue));
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("stage_name"), StageName);
+    Result->SetStringField(TEXT("property"), PropertyName);
+    Result->SetStringField(TEXT("value"), PropertyValue);
+    return Result;
+}
+
+// --- add_niagara_event_handler ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraEventHandler(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString SourceEventName;
+    if (!Params->TryGetStringField(TEXT("source_event_name"), SourceEventName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'source_event_name'"));
+
+    int32 SourceEmitterIndex = -1;
+    Params->TryGetNumberField(TEXT("source_emitter_index"), SourceEmitterIndex);
+
+    FString ExecMode = TEXT("EveryParticle");
+    Params->TryGetStringField(TEXT("execution_mode"), ExecMode);
+
+    int32 MaxEvents = 0;
+    Params->TryGetNumberField(TEXT("max_events_per_frame"), MaxEvents);
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitter VerEmitter = Handles[EmitterIndex].GetInstance();
+    FVersionedNiagaraEmitterData* EmitterData = VerEmitter.GetEmitterData();
+    UNiagaraEmitter* Emitter = VerEmitter.Emitter;
+    if (!Emitter || !EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter"));
+
+    UNiagaraScriptSource* Source = nullptr;
+    UNiagaraGraph* Graph = nullptr;
+    if (!GetEmitterSourceAndGraph(EmitterData, Source, Graph))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No script source/graph on emitter"));
+
+    Emitter->Modify();
+
+    FNiagaraEventScriptProperties EventProps;
+    EventProps.Script = NewObject<UNiagaraScript>(
+        Emitter,
+        MakeUniqueObjectName(Emitter, UNiagaraScript::StaticClass(), TEXT("EventScript")),
+        RF_Transactional);
+    EventProps.Script->SetUsage(ENiagaraScriptUsage::ParticleEventScript);
+    EventProps.Script->SetUsageId(FGuid::NewGuid());
+    EventProps.Script->SetLatestSource(Source);
+
+    EventProps.SourceEventName = *SourceEventName;
+    EventProps.MaxEventsPerFrame = MaxEvents;
+
+    if (ExecMode == TEXT("SpawnedParticles"))
+        EventProps.ExecutionMode = EScriptExecutionMode::SpawnedParticles;
+    else if (ExecMode == TEXT("SingleParticle"))
+        EventProps.ExecutionMode = EScriptExecutionMode::SingleParticle;
+    else
+        EventProps.ExecutionMode = EScriptExecutionMode::EveryParticle;
+
+    if (SourceEmitterIndex >= 0 && Handles.IsValidIndex(SourceEmitterIndex))
+        EventProps.SourceEmitterID = Handles[SourceEmitterIndex].GetId();
+
+    Emitter->AddEventHandler(EventProps, VerEmitter.Version);
+    SetupGraphForNewScript(*Graph, ENiagaraScriptUsage::ParticleEventScript, EventProps.Script->GetUsageId());
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("source_event_name"), SourceEventName);
+    Result->SetStringField(TEXT("execution_mode"), ExecMode);
+    Result->SetNumberField(TEXT("emitter_index"), EmitterIndex);
+    return Result;
+}
+
+// --- set_niagara_emitter_sim_target ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraEmitterSimTarget(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString Target;
+    if (!Params->TryGetStringField(TEXT("sim_target"), Target))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'sim_target' (CPU or GPU)"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    if (!EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter data"));
+
+    ENiagaraSimTarget NewTarget;
+    if (Target == TEXT("GPU") || Target == TEXT("GPUComputeSim"))
+        NewTarget = ENiagaraSimTarget::GPUComputeSim;
+    else
+        NewTarget = ENiagaraSimTarget::CPUSim;
+
+    EmitterData->SimTarget = NewTarget;
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("sim_target"), Target);
+    Result->SetNumberField(TEXT("emitter_index"), EmitterIndex);
+    return Result;
+}
+
+// --- remove_niagara_event_handler ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleRemoveNiagaraEventHandler(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString UsageIdStr;
+    if (!Params->TryGetStringField(TEXT("usage_id"), UsageIdStr))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'usage_id' - get it from get_niagara_deep_inspect event_handlers[].usage_id"));
+
+    FGuid UsageId;
+    if (!FGuid::Parse(UsageIdStr, UsageId))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid 'usage_id' format"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitter VerEmitter = Handles[EmitterIndex].GetInstance();
+    UNiagaraEmitter* Emitter = VerEmitter.Emitter;
+    if (!Emitter)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter"));
+
+    Emitter->Modify();
+    Emitter->RemoveEventHandlerByUsageId(UsageId, VerEmitter.Version);
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("removed_usage_id"), UsageIdStr);
     return Result;
 }

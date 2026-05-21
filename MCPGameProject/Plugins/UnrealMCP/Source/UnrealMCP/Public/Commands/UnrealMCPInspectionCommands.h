@@ -35,4 +35,6 @@ private:
     TSharedPtr<FJsonObject> HandleSetMaterialExpressionProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCompileMaterial(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetSkeletonBones(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetBehaviorTreeInfo(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetMetaSoundGraph(const TSharedPtr<FJsonObject>& Params);
 };

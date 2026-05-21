@@ -193,6 +193,7 @@ from tools.animation_tools import register_animation_tools
 from tools.audio_tools import register_audio_tools
 from tools.datatable_tools import register_datatable_tools
 from tools.level_tools import register_level_tools
+from tools.ai_tools import register_ai_tools
 
 # Register tools
 register_editor_tools(mcp)
@@ -205,6 +206,7 @@ register_animation_tools(mcp)
 register_audio_tools(mcp)
 register_datatable_tools(mcp)
 register_level_tools(mcp)
+register_ai_tools(mcp)
 
 @mcp.prompt()
 def info():

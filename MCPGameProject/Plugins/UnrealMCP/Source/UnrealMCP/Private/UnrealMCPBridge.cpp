@@ -314,7 +314,9 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("disconnect_material_property") ||
                      CommandType == TEXT("set_material_expression_property") ||
                      CommandType == TEXT("compile_material") ||
-                     CommandType == TEXT("get_skeleton_bones"))
+                     CommandType == TEXT("get_skeleton_bones") ||
+                     CommandType == TEXT("get_behavior_tree_info") ||
+                     CommandType == TEXT("get_metasound_graph"))
             {
                 ResultJson = Self->InspectionCommands->HandleCommand(CommandType, Params);
             }
@@ -350,7 +352,19 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("set_niagara_renderer_binding") ||
                      CommandType == TEXT("set_niagara_module_override") ||
                      CommandType == TEXT("set_niagara_custom_vertices") ||
-                     CommandType == TEXT("get_niagara_custom_vertices"))
+                     CommandType == TEXT("get_niagara_custom_vertices") ||
+                     CommandType == TEXT("get_niagara_deep_inspect") ||
+                     CommandType == TEXT("get_niagara_curve_data") ||
+                     CommandType == TEXT("set_niagara_curve_data") ||
+                     CommandType == TEXT("get_niagara_di_properties") ||
+                     CommandType == TEXT("set_niagara_di_property") ||
+                     CommandType == TEXT("add_niagara_simulation_stage") ||
+                     CommandType == TEXT("remove_niagara_simulation_stage") ||
+                     CommandType == TEXT("get_niagara_sim_stage_properties") ||
+                     CommandType == TEXT("set_niagara_sim_stage_property") ||
+                     CommandType == TEXT("add_niagara_event_handler") ||
+                     CommandType == TEXT("set_niagara_emitter_sim_target") ||
+                     CommandType == TEXT("remove_niagara_event_handler"))
             {
                 ResultJson = Self->NiagaraCommands->HandleCommand(CommandType, Params);
             }

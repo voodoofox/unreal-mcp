@@ -37,8 +37,17 @@
 #include "EdGraph/EdGraphPin.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Animation/Skeleton.h"
+#include "MetasoundSource.h"
+#include "MetasoundFrontendDocument.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Engine/SkeletalMesh.h"
+#include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BTCompositeNode.h"
+#include "BehaviorTree/BTTaskNode.h"
+#include "BehaviorTree/BTDecorator.h"
+#include "BehaviorTree/BTService.h"
+#include "BehaviorTree/BlackboardData.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType.h"
 
 // FindBlueprintFlexible is now in CommonUtils::FindBlueprintByName — use FindBlueprint() directly
 static UBlueprint* FindBlueprintFlexible(const FString& BlueprintName)
@@ -131,6 +140,14 @@ TSharedPtr<FJsonObject> FUnrealMCPInspectionCommands::HandleCommand(const FStrin
     else if (CommandType == TEXT("get_skeleton_bones"))
     {
         return HandleGetSkeletonBones(Params);
+    }
+    else if (CommandType == TEXT("get_behavior_tree_info"))
+    {
+        return HandleGetBehaviorTreeInfo(Params);
+    }
+    else if (CommandType == TEXT("get_metasound_graph"))
+    {
+        return HandleGetMetaSoundGraph(Params);
     }
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown inspection command: %s"), *CommandType));
@@ -1884,6 +1901,230 @@ TSharedPtr<FJsonObject> FUnrealMCPInspectionCommands::HandleGetSkeletonBones(con
         BonesArray.Add(MakeShared<FJsonValueObject>(BoneObj));
     }
     Result->SetArrayField(TEXT("bones"), BonesArray);
+
+    return Result;
+}
+
+// --- Helper: serialize decorators from an array ---
+static TArray<TSharedPtr<FJsonValue>> SerializeBTDecorators(const TArray<UBTDecorator*>& Decs)
+{
+    TArray<TSharedPtr<FJsonValue>> Arr;
+    for (int32 d = 0; d < Decs.Num(); d++)
+    {
+        if (!Decs[d]) continue;
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Decs[d]->GetNodeName());
+        Obj->SetStringField(TEXT("class"), Decs[d]->GetClass()->GetName());
+        Arr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    return Arr;
+}
+
+// --- Helper: recursively serialize a BT composite node and its children ---
+static TSharedPtr<FJsonObject> SerializeBTNode(UBTCompositeNode* Composite, int32 Depth = 0)
+{
+    if (!Composite || Depth > 50) return nullptr;
+
+    TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+    NodeObj->SetStringField(TEXT("name"), Composite->GetNodeName());
+    NodeObj->SetStringField(TEXT("class"), Composite->GetClass()->GetName());
+    NodeObj->SetNumberField(TEXT("index"), Composite->GetExecutionIndex());
+
+    // Children
+    TArray<TSharedPtr<FJsonValue>> ChildrenArray;
+    for (int32 i = 0; i < Composite->GetChildrenNum(); i++)
+    {
+        const FBTCompositeChild& Child = Composite->Children[i];
+        TSharedPtr<FJsonObject> ChildObj;
+
+        if (Child.ChildComposite)
+        {
+            ChildObj = SerializeBTNode(Child.ChildComposite, Depth + 1);
+        }
+        else if (Child.ChildTask)
+        {
+            ChildObj = MakeShared<FJsonObject>();
+            ChildObj->SetStringField(TEXT("name"), Child.ChildTask->GetNodeName());
+            ChildObj->SetStringField(TEXT("class"), Child.ChildTask->GetClass()->GetName());
+            ChildObj->SetNumberField(TEXT("index"), Child.ChildTask->GetExecutionIndex());
+        }
+
+        if (ChildObj.IsValid())
+        {
+            TArray<TSharedPtr<FJsonValue>> Decs = SerializeBTDecorators(Child.Decorators);
+            if (Decs.Num() > 0)
+                ChildObj->SetArrayField(TEXT("decorators"), Decs);
+            ChildrenArray.Add(MakeShared<FJsonValueObject>(ChildObj));
+        }
+    }
+    if (ChildrenArray.Num() > 0)
+        NodeObj->SetArrayField(TEXT("children"), ChildrenArray);
+
+    return NodeObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPInspectionCommands::HandleGetBehaviorTreeInfo(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path' parameter"));
+    }
+
+    UBehaviorTree* BT = LoadObject<UBehaviorTree>(nullptr, *AssetPath);
+    if (!BT)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("BehaviorTree not found: %s"), *AssetPath));
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("name"), BT->GetName());
+    Result->SetStringField(TEXT("path"), BT->GetPathName());
+
+    // Blackboard asset
+    UBlackboardData* BB = BT->BlackboardAsset;
+    if (BB)
+    {
+        Result->SetStringField(TEXT("blackboard"), BB->GetPathName());
+
+        TArray<TSharedPtr<FJsonValue>> KeysArray;
+        for (int32 ki = 0; ki < BB->Keys.Num(); ki++)
+        {
+            const FBlackboardEntry& Entry = BB->Keys[ki];
+            TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
+            KeyObj->SetStringField(TEXT("name"), Entry.EntryName.ToString());
+            if (Entry.KeyType)
+                KeyObj->SetStringField(TEXT("type"), Entry.KeyType->GetClass()->GetName());
+            KeysArray.Add(MakeShared<FJsonValueObject>(KeyObj));
+        }
+        for (int32 ki = 0; ki < BB->ParentKeys.Num(); ki++)
+        {
+            const FBlackboardEntry& Entry = BB->ParentKeys[ki];
+            TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
+            KeyObj->SetStringField(TEXT("name"), Entry.EntryName.ToString());
+            if (Entry.KeyType)
+                KeyObj->SetStringField(TEXT("type"), Entry.KeyType->GetClass()->GetName());
+            KeyObj->SetBoolField(TEXT("inherited"), true);
+            KeysArray.Add(MakeShared<FJsonValueObject>(KeyObj));
+        }
+        Result->SetArrayField(TEXT("blackboard_keys"), KeysArray);
+    }
+
+    // Tree structure
+    if (BT->RootNode)
+    {
+        TSharedPtr<FJsonObject> TreeObj = SerializeBTNode(BT->RootNode);
+        if (TreeObj.IsValid())
+        {
+            Result->SetObjectField(TEXT("tree"), TreeObj);
+        }
+    }
+
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPInspectionCommands::HandleGetMetaSoundGraph(const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path'"));
+
+    UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+    if (!Asset)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+
+    UMetaSoundSource* MSSource = Cast<UMetaSoundSource>(Asset);
+    if (!MSSource)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Asset is not a MetaSoundSource (got %s)"), *Asset->GetClass()->GetName()));
+
+    const FMetasoundFrontendDocument& Doc = MSSource->GetConstDocument();
+    const FMetasoundFrontendGraphClass& RootGraph = Doc.RootGraph;
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("name"), MSSource->GetName());
+    Result->SetStringField(TEXT("path"), MSSource->GetPathName());
+
+    // Interfaces (inputs/outputs of the root graph)
+    const FMetasoundFrontendClassInterface& Interface = RootGraph.Interface;
+    TArray<TSharedPtr<FJsonValue>> InputsArr;
+    for (const FMetasoundFrontendClassInput& Input : Interface.Inputs)
+    {
+        TSharedPtr<FJsonObject> IObj = MakeShared<FJsonObject>();
+        IObj->SetStringField(TEXT("name"), Input.Name.ToString());
+        IObj->SetStringField(TEXT("type"), Input.TypeName.ToString());
+        IObj->SetStringField(TEXT("id"), Input.VertexID.ToString());
+        InputsArr.Add(MakeShared<FJsonValueObject>(IObj));
+    }
+    Result->SetArrayField(TEXT("inputs"), InputsArr);
+
+    TArray<TSharedPtr<FJsonValue>> OutputsArr;
+    for (const FMetasoundFrontendClassOutput& Output : Interface.Outputs)
+    {
+        TSharedPtr<FJsonObject> OObj = MakeShared<FJsonObject>();
+        OObj->SetStringField(TEXT("name"), Output.Name.ToString());
+        OObj->SetStringField(TEXT("type"), Output.TypeName.ToString());
+        OObj->SetStringField(TEXT("id"), Output.VertexID.ToString());
+        OutputsArr.Add(MakeShared<FJsonValueObject>(OObj));
+    }
+    Result->SetArrayField(TEXT("outputs"), OutputsArr);
+
+    // Nodes
+    const FMetasoundFrontendGraph& Graph = RootGraph.Graph;
+    TArray<TSharedPtr<FJsonValue>> NodesArr;
+    for (const FMetasoundFrontendNode& Node : Graph.Nodes)
+    {
+        TSharedPtr<FJsonObject> NObj = MakeShared<FJsonObject>();
+        NObj->SetStringField(TEXT("id"), Node.GetID().ToString());
+        NObj->SetStringField(TEXT("class_id"), Node.ClassID.ToString());
+
+        if (!Node.Name.IsNone())
+            NObj->SetStringField(TEXT("name"), Node.Name.ToString());
+
+        // Node inputs
+        TArray<TSharedPtr<FJsonValue>> NodeInputsArr;
+        for (const FMetasoundFrontendVertex& V : Node.Interface.Inputs)
+        {
+            TSharedPtr<FJsonObject> VObj = MakeShared<FJsonObject>();
+            VObj->SetStringField(TEXT("name"), V.Name.ToString());
+            VObj->SetStringField(TEXT("type"), V.TypeName.ToString());
+            NodeInputsArr.Add(MakeShared<FJsonValueObject>(VObj));
+        }
+        NObj->SetArrayField(TEXT("inputs"), NodeInputsArr);
+
+        // Node outputs
+        TArray<TSharedPtr<FJsonValue>> NodeOutputsArr;
+        for (const FMetasoundFrontendVertex& V : Node.Interface.Outputs)
+        {
+            TSharedPtr<FJsonObject> VObj = MakeShared<FJsonObject>();
+            VObj->SetStringField(TEXT("name"), V.Name.ToString());
+            VObj->SetStringField(TEXT("type"), V.TypeName.ToString());
+            NodeOutputsArr.Add(MakeShared<FJsonValueObject>(VObj));
+        }
+        NObj->SetArrayField(TEXT("outputs"), NodeOutputsArr);
+
+        NodesArr.Add(MakeShared<FJsonValueObject>(NObj));
+    }
+    Result->SetArrayField(TEXT("nodes"), NodesArr);
+    Result->SetNumberField(TEXT("node_count"), Graph.Nodes.Num());
+
+    // Edges (connections)
+    TArray<TSharedPtr<FJsonValue>> EdgesArr;
+    for (const FMetasoundFrontendEdge& Edge : Graph.Edges)
+    {
+        TSharedPtr<FJsonObject> EObj = MakeShared<FJsonObject>();
+        EObj->SetStringField(TEXT("from_node"), Edge.FromNodeID.ToString());
+        EObj->SetStringField(TEXT("from_vertex"), Edge.FromVertexID.ToString());
+        EObj->SetStringField(TEXT("to_node"), Edge.ToNodeID.ToString());
+        EObj->SetStringField(TEXT("to_vertex"), Edge.ToVertexID.ToString());
+        EdgesArr.Add(MakeShared<FJsonValueObject>(EObj));
+    }
+    Result->SetArrayField(TEXT("edges"), EdgesArr);
+    Result->SetNumberField(TEXT("edge_count"), Graph.Edges.Num());
 
     return Result;
 }

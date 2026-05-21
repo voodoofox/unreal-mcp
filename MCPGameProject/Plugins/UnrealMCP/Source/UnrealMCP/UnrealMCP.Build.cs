@@ -54,7 +54,11 @@ public class UnrealMCP : ModuleRules
 				"AssetRegistry",
 				"MaterialEditor",
 				"Niagara",
-				"NiagaraEditor"
+				"NiagaraEditor",
+				"AIModule",
+				"GameplayTasks",
+				"MetasoundEngine",
+				"MetasoundFrontend"
 			}
 		);
 		
