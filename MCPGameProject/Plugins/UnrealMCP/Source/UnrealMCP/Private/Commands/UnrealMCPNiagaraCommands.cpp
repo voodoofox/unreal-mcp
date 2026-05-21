@@ -31,6 +31,7 @@
 #include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #include "NiagaraTypes.h"
 #include "NiagaraEditorUtilities.h"
+#include "NiagaraEffectType.h"
 #pragma warning(pop)
 
 #include "AssetToolsModule.h"
@@ -189,6 +190,14 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleRemoveNiagaraEventHandler(Params);
     if (CommandType == TEXT("add_niagara_emitter"))
         return HandleAddNiagaraEmitter(Params);
+    if (CommandType == TEXT("set_niagara_event_handler_property"))
+        return HandleSetNiagaraEventHandlerProperty(Params);
+    if (CommandType == TEXT("move_niagara_simulation_stage"))
+        return HandleMoveNiagaraSimulationStage(Params);
+    if (CommandType == TEXT("get_niagara_scalability"))
+        return HandleGetNiagaraScalabilitySettings(Params);
+    if (CommandType == TEXT("set_niagara_scalability_override"))
+        return HandleSetNiagaraScalabilityOverride(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -3503,5 +3512,237 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraEmitter(
     Result->SetStringField(TEXT("source_emitter"), EmitterPath);
     Result->SetNumberField(TEXT("emitter_count"), Handles.Num());
     Result->SetStringField(TEXT("handle_id"), NewHandleId.ToString());
+    return Result;
+}
+
+// --- set_niagara_event_handler_property: modify existing event handler ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraEventHandlerProperty(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString UsageIdStr;
+    if (!Params->TryGetStringField(TEXT("usage_id"), UsageIdStr))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'usage_id'"));
+
+    FGuid UsageId;
+    if (!FGuid::Parse(UsageIdStr, UsageId))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid 'usage_id'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitter VerEmitter = Handles[EmitterIndex].GetInstance();
+    FVersionedNiagaraEmitterData* EmitterData = VerEmitter.GetEmitterData();
+    if (!EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter data"));
+
+    FNiagaraEventScriptProperties* EventProps = EmitterData->GetEventHandlerByIdUnsafe(UsageId);
+    if (!EventProps)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Event handler not found"));
+
+    FString Value;
+    if (Params->TryGetStringField(TEXT("source_event_name"), Value))
+        EventProps->SourceEventName = *Value;
+
+    if (Params->TryGetStringField(TEXT("execution_mode"), Value))
+    {
+        if (Value == TEXT("SpawnedParticles"))
+            EventProps->ExecutionMode = EScriptExecutionMode::SpawnedParticles;
+        else if (Value == TEXT("SingleParticle"))
+            EventProps->ExecutionMode = EScriptExecutionMode::SingleParticle;
+        else
+            EventProps->ExecutionMode = EScriptExecutionMode::EveryParticle;
+    }
+
+    int32 IntVal;
+    if (Params->TryGetNumberField(TEXT("max_events_per_frame"), IntVal))
+        EventProps->MaxEventsPerFrame = IntVal;
+
+    if (Params->TryGetNumberField(TEXT("spawn_number"), IntVal))
+        EventProps->SpawnNumber = IntVal;
+
+    int32 SourceEmitterIndex = -1;
+    if (Params->TryGetNumberField(TEXT("source_emitter_index"), SourceEmitterIndex))
+    {
+        if (Handles.IsValidIndex(SourceEmitterIndex))
+            EventProps->SourceEmitterID = Handles[SourceEmitterIndex].GetId();
+    }
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("usage_id"), UsageIdStr);
+    return Result;
+}
+
+// --- move_niagara_simulation_stage: reorder stage ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleMoveNiagaraSimulationStage(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString StageName;
+    if (!Params->TryGetStringField(TEXT("stage_name"), StageName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'stage_name'"));
+
+    int32 TargetIndex = 0;
+    if (!Params->TryGetNumberField(TEXT("target_index"), TargetIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'target_index'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitter VerEmitter = Handles[EmitterIndex].GetInstance();
+    FVersionedNiagaraEmitterData* EmitterData = VerEmitter.GetEmitterData();
+    UNiagaraEmitter* Emitter = VerEmitter.Emitter;
+    if (!Emitter || !EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter"));
+
+    UNiagaraSimulationStageBase* FoundStage = nullptr;
+    for (UNiagaraSimulationStageBase* Stage : EmitterData->GetSimulationStages())
+    {
+        if (Stage && Stage->SimulationStageName.ToString() == StageName)
+        {
+            FoundStage = Stage;
+            break;
+        }
+    }
+    if (!FoundStage)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Simulation stage '%s' not found"), *StageName));
+
+    Emitter->MoveSimulationStageToIndex(FoundStage, TargetIndex, VerEmitter.Version);
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("stage_name"), StageName);
+    Result->SetNumberField(TEXT("target_index"), TargetIndex);
+    return Result;
+}
+
+// --- get_niagara_scalability: read emitter scalability settings ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraScalabilitySettings(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    if (!EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter data"));
+
+    const FNiagaraEmitterScalabilitySettings& Settings = EmitterData->GetScalabilitySettings();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetBoolField(TEXT("scale_spawn_count"), Settings.bScaleSpawnCount);
+    Result->SetNumberField(TEXT("spawn_count_scale"), Settings.SpawnCountScale);
+
+    // Overrides
+    TArray<TSharedPtr<FJsonValue>> OverridesArr;
+    for (const FNiagaraEmitterScalabilityOverride& Override : EmitterData->ScalabilityOverrides.Overrides)
+    {
+        TSharedPtr<FJsonObject> OObj = MakeShared<FJsonObject>();
+        OObj->SetBoolField(TEXT("override_spawn_count_scale"), Override.bOverrideSpawnCountScale);
+        OObj->SetBoolField(TEXT("scale_spawn_count"), Override.bScaleSpawnCount);
+        OObj->SetNumberField(TEXT("spawn_count_scale"), Override.SpawnCountScale);
+        OverridesArr.Add(MakeShared<FJsonValueObject>(OObj));
+    }
+    Result->SetArrayField(TEXT("overrides"), OverridesArr);
+
+    return Result;
+}
+
+// --- set_niagara_scalability_override: set emitter spawn count scale ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraScalabilityOverride(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    double SpawnCountScale = 1.0;
+    if (!Params->TryGetNumberField(TEXT("spawn_count_scale"), SpawnCountScale))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'spawn_count_scale'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+    if (!EmitterData)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter data"));
+
+    if (EmitterData->ScalabilityOverrides.Overrides.Num() == 0)
+    {
+        FNiagaraEmitterScalabilityOverride NewOverride;
+        NewOverride.bOverrideSpawnCountScale = true;
+        NewOverride.bScaleSpawnCount = true;
+        NewOverride.SpawnCountScale = (float)SpawnCountScale;
+        EmitterData->ScalabilityOverrides.Overrides.Add(NewOverride);
+    }
+    else
+    {
+        FNiagaraEmitterScalabilityOverride& Override = EmitterData->ScalabilityOverrides.Overrides[0];
+        Override.bOverrideSpawnCountScale = true;
+        Override.bScaleSpawnCount = true;
+        Override.SpawnCountScale = (float)SpawnCountScale;
+    }
+
+    System->RequestCompile(false);
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetNumberField(TEXT("spawn_count_scale"), SpawnCountScale);
     return Result;
 }

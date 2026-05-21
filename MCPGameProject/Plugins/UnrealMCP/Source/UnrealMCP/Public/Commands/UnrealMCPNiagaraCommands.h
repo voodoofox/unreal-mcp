@@ -85,4 +85,8 @@ private:
     TSharedPtr<FJsonObject> HandleSetNiagaraEmitterSimTarget(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRemoveNiagaraEventHandler(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleAddNiagaraEmitter(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNiagaraEventHandlerProperty(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleMoveNiagaraSimulationStage(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetNiagaraScalabilitySettings(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNiagaraScalabilityOverride(const TSharedPtr<FJsonObject>& Params);
 };
