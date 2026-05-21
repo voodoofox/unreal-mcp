@@ -93,4 +93,5 @@ private:
     TSharedPtr<FJsonObject> HandleGetNiagaraScratchPadScripts(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCreateNiagaraHlslModule(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleExportNiagaraSystemSpec(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetNiagaraStatelessEmitterInfo(const TSharedPtr<FJsonObject>& Params);
 };

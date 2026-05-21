@@ -211,6 +211,8 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleCreateNiagaraHlslModule(Params);
     if (CommandType == TEXT("export_niagara_system_spec"))
         return HandleExportNiagaraSystemSpec(Params);
+    if (CommandType == TEXT("get_niagara_stateless_emitter_info"))
+        return HandleGetNiagaraStatelessEmitterInfo(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -4188,5 +4190,106 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleExportNiagaraSystemSpec
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("status"), TEXT("success"));
     Result->SetObjectField(TEXT("spec"), Spec);
+    return Result;
+}
+
+// --- get_niagara_stateless_emitter_info ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraStatelessEmitterInfo(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    if (!Handles.IsValidIndex(EmitterIndex))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+    // GetStatelessEmitter returns forward-declared type - cast via GetEmitterBase which returns UNiagaraEmitterBase (a UObject)
+    UObject* SLE = Handles[EmitterIndex].GetStatelessEmitter() ? Handles[EmitterIndex].GetEmitterBase() : nullptr;
+    if (!SLE)
+    {
+        TArray<TSharedPtr<FJsonValue>> StatelessList;
+        for (int32 i = 0; i < Handles.Num(); i++)
+        {
+            if (Handles[i].GetStatelessEmitter())
+            {
+                TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+                Obj->SetNumberField(TEXT("index"), i);
+                Obj->SetStringField(TEXT("name"), Handles[i].GetName().ToString());
+                StatelessList.Add(MakeShared<FJsonValueObject>(Obj));
+            }
+        }
+        TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+        Err->SetStringField(TEXT("status"), TEXT("error"));
+        Err->SetStringField(TEXT("error"),
+            FString::Printf(TEXT("Emitter %d is not a stateless emitter"), EmitterIndex));
+        Err->SetArrayField(TEXT("stateless_emitters"), StatelessList);
+        return Err;
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("name"), Handles[EmitterIndex].GetName().ToString());
+    Result->SetStringField(TEXT("type"), TEXT("Stateless"));
+    Result->SetStringField(TEXT("class"), SLE->GetClass()->GetName());
+
+    // All emitter properties via reflection
+    Result->SetArrayField(TEXT("emitter_properties"), SerializeEditableProperties(SLE));
+
+    // Find "Modules" TArray property and iterate via reflection
+    TArray<TSharedPtr<FJsonValue>> ModulesArr;
+    FArrayProperty* ModulesProp = CastField<FArrayProperty>(SLE->GetClass()->FindPropertyByName(TEXT("Modules")));
+    if (ModulesProp)
+    {
+        FScriptArrayHelper ArrayHelper(ModulesProp, ModulesProp->ContainerPtrToValuePtr<void>(SLE));
+        FObjectProperty* InnerProp = CastField<FObjectProperty>(ModulesProp->Inner);
+        if (InnerProp)
+        {
+            for (int32 mi = 0; mi < ArrayHelper.Num(); mi++)
+            {
+                UObject* Mod = InnerProp->GetObjectPropertyValue(ArrayHelper.GetRawPtr(mi));
+                if (!Mod) continue;
+                TSharedPtr<FJsonObject> MObj = MakeShared<FJsonObject>();
+                MObj->SetStringField(TEXT("name"), Mod->GetClass()->GetName());
+                MObj->SetArrayField(TEXT("properties"), SerializeEditableProperties(Mod));
+                ModulesArr.Add(MakeShared<FJsonValueObject>(MObj));
+            }
+        }
+    }
+    Result->SetArrayField(TEXT("modules"), ModulesArr);
+    Result->SetNumberField(TEXT("module_count"), ModulesArr.Num());
+
+    // Find "RendererProperties" TArray and iterate
+    TArray<TSharedPtr<FJsonValue>> RendArr;
+    FArrayProperty* RendProp = CastField<FArrayProperty>(SLE->GetClass()->FindPropertyByName(TEXT("RendererProperties")));
+    if (RendProp)
+    {
+        FScriptArrayHelper ArrayHelper(RendProp, RendProp->ContainerPtrToValuePtr<void>(SLE));
+        FObjectProperty* InnerProp = CastField<FObjectProperty>(RendProp->Inner);
+        if (InnerProp)
+        {
+            for (int32 ri = 0; ri < ArrayHelper.Num(); ri++)
+            {
+                UObject* Rend = InnerProp->GetObjectPropertyValue(ArrayHelper.GetRawPtr(ri));
+                if (!Rend) continue;
+                TSharedPtr<FJsonObject> RObj = MakeShared<FJsonObject>();
+                RObj->SetStringField(TEXT("type"), Rend->GetClass()->GetName());
+                RObj->SetBoolField(TEXT("enabled"), Cast<UNiagaraRendererProperties>(Rend) ? Cast<UNiagaraRendererProperties>(Rend)->GetIsEnabled() : true);
+                RObj->SetArrayField(TEXT("properties"), SerializeEditableProperties(Rend));
+                RendArr.Add(MakeShared<FJsonValueObject>(RObj));
+            }
+        }
+    }
+    Result->SetArrayField(TEXT("renderers"), RendArr);
+
     return Result;
 }

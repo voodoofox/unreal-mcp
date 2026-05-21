@@ -373,7 +373,8 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("get_niagara_data_channel_info") ||
                      CommandType == TEXT("get_niagara_scratch_pad_scripts") ||
                      CommandType == TEXT("create_niagara_hlsl_module") ||
-                     CommandType == TEXT("export_niagara_system_spec"))
+                     CommandType == TEXT("export_niagara_system_spec") ||
+                     CommandType == TEXT("get_niagara_stateless_emitter_info"))
             {
                 ResultJson = Self->NiagaraCommands->HandleCommand(CommandType, Params);
             }
