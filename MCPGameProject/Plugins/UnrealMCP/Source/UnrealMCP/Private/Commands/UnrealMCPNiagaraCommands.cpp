@@ -32,6 +32,9 @@
 #include "NiagaraTypes.h"
 #include "NiagaraEditorUtilities.h"
 #include "NiagaraEffectType.h"
+#include "NiagaraDataChannelAsset.h"
+#include "NiagaraDataChannel.h"
+#include "NiagaraScratchPadContainer.h"
 #pragma warning(pop)
 
 #include "AssetToolsModule.h"
@@ -198,6 +201,10 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleGetNiagaraScalabilitySettings(Params);
     if (CommandType == TEXT("set_niagara_scalability_override"))
         return HandleSetNiagaraScalabilityOverride(Params);
+    if (CommandType == TEXT("get_niagara_data_channel_info"))
+        return HandleGetNiagaraDataChannelInfo(Params);
+    if (CommandType == TEXT("get_niagara_scratch_pad_scripts"))
+        return HandleGetNiagaraScratchPadScripts(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -3744,5 +3751,114 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraScalabilityOv
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("status"), TEXT("success"));
     Result->SetNumberField(TEXT("spawn_count_scale"), SpawnCountScale);
+    return Result;
+}
+
+// --- get_niagara_data_channel_info: inspect a data channel asset ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraDataChannelInfo(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString AssetPath;
+    if (!Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'asset_path'"));
+
+    UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+    if (!Asset)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Asset not found"));
+
+    UNiagaraDataChannelAsset* DCAsset = Cast<UNiagaraDataChannelAsset>(Asset);
+    if (!DCAsset)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Not a NiagaraDataChannelAsset"));
+
+    UNiagaraDataChannel* DC = DCAsset->Get();
+    if (!DC)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("DataChannel is null"));
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("name"), DCAsset->GetName());
+    Result->SetStringField(TEXT("path"), DCAsset->GetPathName());
+    Result->SetStringField(TEXT("channel_class"), DC->GetClass()->GetName());
+
+    TArray<TSharedPtr<FJsonValue>> VarsArray;
+    for (const FNiagaraDataChannelVariable& Var : DC->GetVariables())
+    {
+        TSharedPtr<FJsonObject> VObj = MakeShared<FJsonObject>();
+        VObj->SetStringField(TEXT("name"), Var.GetName().ToString());
+        VObj->SetStringField(TEXT("type"), Var.GetType().GetName());
+        VarsArray.Add(MakeShared<FJsonValueObject>(VObj));
+    }
+    Result->SetArrayField(TEXT("variables"), VarsArray);
+    Result->SetNumberField(TEXT("variable_count"), DC->GetVariables().Num());
+
+    // Read editable properties via reflection
+    TArray<TSharedPtr<FJsonValue>> PropsArray;
+    for (TFieldIterator<FProperty> PropIt(DC->GetClass()); PropIt; ++PropIt)
+    {
+        FProperty* Prop = *PropIt;
+        if (!Prop->HasAnyPropertyFlags(CPF_Edit)) continue;
+        if (Prop->GetName() == TEXT("ChannelVariables")) continue;
+
+        TSharedPtr<FJsonObject> PObj = MakeShared<FJsonObject>();
+        PObj->SetStringField(TEXT("name"), Prop->GetName());
+        PObj->SetStringField(TEXT("type"), Prop->GetCPPType());
+        FString ValueStr;
+        const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(DC);
+        Prop->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, DC, PPF_None);
+        PObj->SetStringField(TEXT("value"), ValueStr);
+        PropsArray.Add(MakeShared<FJsonValueObject>(PObj));
+    }
+    Result->SetArrayField(TEXT("properties"), PropsArray);
+
+    return Result;
+}
+
+// --- get_niagara_scratch_pad_scripts: list scratch pad scripts in a system ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraScratchPadScripts(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+
+    TArray<TSharedPtr<FJsonValue>> AllScripts;
+
+    const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+    for (int32 i = 0; i < Handles.Num(); i++)
+    {
+        FVersionedNiagaraEmitterData* EmitterData = Handles[i].GetInstance().GetEmitterData();
+        if (!EmitterData) continue;
+
+#if WITH_EDITORONLY_DATA
+        if (EmitterData->ScratchPads)
+        {
+            for (UNiagaraScript* Script : EmitterData->ScratchPads->Scripts)
+            {
+                if (!Script) continue;
+                TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
+                SObj->SetStringField(TEXT("name"), Script->GetName());
+                SObj->SetStringField(TEXT("emitter"), Handles[i].GetName().ToString());
+                SObj->SetNumberField(TEXT("emitter_index"), i);
+                SObj->SetStringField(TEXT("usage"), StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue((int64)Script->GetUsage()));
+
+                SObj->SetStringField(TEXT("path"), Script->GetPathName());
+
+                AllScripts.Add(MakeShared<FJsonValueObject>(SObj));
+            }
+        }
+#endif
+    }
+
+    Result->SetArrayField(TEXT("scratch_pad_scripts"), AllScripts);
+    Result->SetNumberField(TEXT("count"), AllScripts.Num());
     return Result;
 }

@@ -369,7 +369,9 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("set_niagara_event_handler_property") ||
                      CommandType == TEXT("move_niagara_simulation_stage") ||
                      CommandType == TEXT("get_niagara_scalability") ||
-                     CommandType == TEXT("set_niagara_scalability_override"))
+                     CommandType == TEXT("set_niagara_scalability_override") ||
+                     CommandType == TEXT("get_niagara_data_channel_info") ||
+                     CommandType == TEXT("get_niagara_scratch_pad_scripts"))
             {
                 ResultJson = Self->NiagaraCommands->HandleCommand(CommandType, Params);
             }

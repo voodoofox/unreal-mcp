@@ -179,4 +179,34 @@ else:
 """
         return _run_python(unreal, code)
 
+    @async_tool(mcp)
+    def list_niagara_data_channels(
+        ctx: Context,
+        path: str = "/Game",
+        recursive: bool = True
+    ) -> Dict[str, Any]:
+        """
+        List all Niagara Data Channel assets under a content browser path.
+
+        Args:
+            path: Content browser path to search
+            recursive: Search subdirectories
+        """
+        unreal = get_unreal_connection()
+        if not unreal:
+            return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+        code = f"""
+import unreal, json
+eal = unreal.EditorAssetLibrary
+paths = eal.list_assets('{path}', recursive={recursive}, include_folder=False)
+results = []
+for p in paths:
+    ad = eal.find_asset_data(p)
+    if ad.asset_class_path.asset_name == 'NiagaraDataChannelAsset':
+        results.append({{"name": str(ad.asset_name), "path": str(ad.package_name)}})
+print(json.dumps(results))
+"""
+        return _run_python(unreal, code)
+
     logger.info("AI/BehaviorTree tools registered successfully")
