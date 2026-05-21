@@ -3832,6 +3832,19 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraScratchPadScr
 
     TArray<TSharedPtr<FJsonValue>> AllScripts;
 
+    // System-level scratch pad scripts
+    for (UNiagaraScript* Script : System->ScratchPadScripts)
+    {
+        if (!Script) continue;
+        TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
+        SObj->SetStringField(TEXT("name"), Script->GetName());
+        SObj->SetStringField(TEXT("scope"), TEXT("System"));
+        SObj->SetStringField(TEXT("usage"), StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue((int64)Script->GetUsage()));
+        SObj->SetStringField(TEXT("path"), Script->GetPathName());
+        AllScripts.Add(MakeShared<FJsonValueObject>(SObj));
+    }
+
+    // Per-emitter scratch pad scripts
     const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
     for (int32 i = 0; i < Handles.Num(); i++)
     {
@@ -3846,12 +3859,11 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraScratchPadScr
                 if (!Script) continue;
                 TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
                 SObj->SetStringField(TEXT("name"), Script->GetName());
+                SObj->SetStringField(TEXT("scope"), TEXT("Emitter"));
                 SObj->SetStringField(TEXT("emitter"), Handles[i].GetName().ToString());
                 SObj->SetNumberField(TEXT("emitter_index"), i);
                 SObj->SetStringField(TEXT("usage"), StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue((int64)Script->GetUsage()));
-
                 SObj->SetStringField(TEXT("path"), Script->GetPathName());
-
                 AllScripts.Add(MakeShared<FJsonValueObject>(SObj));
             }
         }
