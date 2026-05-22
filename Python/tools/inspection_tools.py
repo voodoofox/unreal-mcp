@@ -814,4 +814,101 @@ def register_inspection_tools(mcp: FastMCP):
         except Exception as e:
             return {"success": False, "message": str(e)}
 
+    @async_tool(mcp)
+    def import_niagara_system_spec(
+        ctx: Context,
+        system_path: str,
+        spec: dict
+    ) -> Dict[str, Any]:
+        """
+        Apply a system spec (from export_niagara_system_spec) to configure a Niagara system.
+        Uses batch mode for single compile at the end.
+
+        Args:
+            system_path: Target system to configure
+            spec: The spec dict (or the 'spec' field from export output)
+        """
+        from connection_holder import get_unreal_connection
+        import json as _json
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+
+            commands = []
+
+            for emitter in spec.get("emitters", []):
+                ei = emitter.get("index", 0)
+
+                # Sim target
+                if emitter.get("sim_target"):
+                    commands.append({
+                        "type": "set_niagara_emitter_sim_target",
+                        "params": {"emitter_index": ei, "sim_target": emitter["sim_target"]}
+                    })
+
+                # Scalability
+                scal = emitter.get("scalability", {})
+                if scal.get("spawn_count_scale") is not None:
+                    commands.append({
+                        "type": "set_niagara_scalability_override",
+                        "params": {"emitter_index": ei, "spawn_count_scale": scal["spawn_count_scale"]}
+                    })
+
+                # Curve DI keypoints
+                for di in emitter.get("data_interfaces", []):
+                    di_name = di.get("name")
+                    if not di_name:
+                        continue
+                    curve_params = {"emitter_index": ei, "di_name": di_name}
+                    has_curves = False
+                    for key in ["curve", "x_curve", "y_curve", "z_curve",
+                                "red_curve", "green_curve", "blue_curve", "alpha_curve"]:
+                        if key in di and di[key]:
+                            curve_params[key] = di[key]
+                            has_curves = True
+                    if has_curves:
+                        commands.append({
+                            "type": "set_niagara_curve_data",
+                            "params": curve_params
+                        })
+
+                    # DI properties (non-curve)
+                    for prop in di.get("properties", []):
+                        pname = prop.get("name")
+                        pval = prop.get("value")
+                        if pname and pval and pname != "Curve":
+                            commands.append({
+                                "type": "set_niagara_di_property",
+                                "params": {
+                                    "emitter_index": ei,
+                                    "di_name": di_name,
+                                    "property_name": pname,
+                                    "property_value": str(pval)
+                                }
+                            })
+
+            if not commands:
+                return {"success": True, "message": "No commands generated from spec", "commands": 0}
+
+            # Execute all via batch
+            response = unreal.send_command("batch_niagara_commands", {
+                "system_path": system_path,
+                "commands": commands
+            })
+            if not response:
+                return {"success": False, "message": "No response from batch"}
+
+            result = response.get("result", response)
+            return {
+                "success": True,
+                "commands_sent": len(commands),
+                "succeeded": result.get("succeeded", 0),
+                "failed": result.get("failed", 0),
+            }
+
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
     logger.info("Inspection tools registered successfully")
