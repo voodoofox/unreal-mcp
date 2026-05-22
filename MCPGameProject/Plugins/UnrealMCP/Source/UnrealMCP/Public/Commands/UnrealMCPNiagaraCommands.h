@@ -95,4 +95,10 @@ private:
     TSharedPtr<FJsonObject> HandleExportNiagaraSystemSpec(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetNiagaraStatelessEmitterInfo(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetNiagaraScratchPadHlsl(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleBatchNiagaraCommands(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNiagaraStatelessModuleProperty(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleGetNiagaraParameterCollection(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSetNiagaraParameterCollectionValue(const TSharedPtr<FJsonObject>& Params);
+
+    bool bBatchMode = false;
 };
