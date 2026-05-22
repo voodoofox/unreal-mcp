@@ -5,13 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.5%2B-orange)](https://www.unrealengine.com)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-yellow)](https://www.python.org)
-[![Tools](https://img.shields.io/badge/Tools-100%2B-green)]()
+[![Tools](https://img.shields.io/badge/Tools-120%2B-green)]()
+[![Niagara](https://img.shields.io/badge/Niagara-65_commands-purple)]()
 
 **Control Unreal Engine from AI assistants via the Model Context Protocol**
 
 </div>
 
-Unreal MCP lets AI assistants (Claude Code, Cursor, Windsurf, Claude Desktop) control the Unreal Editor through natural language. 100+ tools across 11 categories - from spawning actors to editing blueprint graphs to wiring materials to controlling Niagara VFX.
+Unreal MCP lets AI assistants (Claude Code, Cursor, Windsurf, Claude Desktop) control the Unreal Editor through natural language. 120+ tools across 11 categories, including the deepest Niagara VFX integration (65 commands) of any MCP plugin.
 
 ## What Can It Do?
 
@@ -21,13 +22,13 @@ Unreal MCP lets AI assistants (Claude Code, Cursor, Windsurf, Claude Desktop) co
 | **Blueprint Development** | 7 | Create blueprints, add components, set properties, compile |
 | **Blueprint Graph Editing** | 16 | Add nodes, variables, events, connections, control flow |
 | **Materials & Inspection** | 20 | Create/wire materials, inspect assets, Nanite control |
-| **Niagara VFX** | 44+ | Deep system control - modules, DI properties, curve editing, sim stages, events |
+| **Niagara VFX** | 65 | System/emitter/module/renderer control, curve keypoint editing, DI properties, simulation stages, event handlers, scratch pad HLSL, parameter collections, batch ops, system spec export/import, scalability, stateless emitters |
 | **UMG Widgets** | 6 | Create widget blueprints, buttons, text blocks, bindings |
 | **Animation** | 7 | Inspect sequences, montages, skeleton bone hierarchy |
 | **Audio** | 6 | Inspect sound waves, cues, attenuation, play sounds |
 | **DataTables** | 4 | List, inspect, export DataTable rows as JSON |
 | **Level & World** | 6 | Level info, world settings, streaming, actor summaries |
-| **AI / Behavior Trees** | 5 | Tree structure, blackboard keys, decorators, MetaSound graphs |
+| **AI / Behavior Trees** | 7 | BT structure, blackboard keys, MetaSound graph reader, data channel inspection |
 
 Plus `run_python_in_unreal`  - execute arbitrary Python inside the editor for anything the tools don't cover.
 
