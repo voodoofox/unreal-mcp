@@ -31,6 +31,12 @@
 #include "ViewModels/Stack/NiagaraStackGraphUtilities.h"
 #include "NiagaraTypes.h"
 #include "NiagaraEditorUtilities.h"
+#include "ViewModels/NiagaraSystemViewModel.h"
+#include "ViewModels/NiagaraEmitterHandleViewModel.h"
+#include "ViewModels/Stack/NiagaraStackViewModel.h"
+#include "ViewModels/Stack/NiagaraStackEntry.h"
+#include "ViewModels/Stack/NiagaraStackModuleItem.h"
+#include "ViewModels/Stack/NiagaraStackFunctionInput.h"
 #include "NiagaraScriptFactoryNew.h"
 #include "NiagaraNodeCustomHlsl.h"
 #include "NiagaraEffectType.h"
@@ -238,6 +244,8 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleDeleteNiagaraScratchPadScript(Params);
     if (CommandType == TEXT("move_niagara_renderer"))
         return HandleMoveNiagaraRenderer(Params);
+    if (CommandType == TEXT("link_niagara_module_input"))
+        return HandleLinkNiagaraModuleInput(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -1476,8 +1484,11 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraModule(
     if (!NewNode)
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to add module to stack"));
 
-    System->RequestCompile(false);
-    System->MarkPackageDirty();
+    if (!bBatchMode)
+    {
+        System->RequestCompile(false);
+        System->MarkPackageDirty();
+    }
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetBoolField(TEXT("success"), true);
@@ -1553,8 +1564,11 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleRemoveNiagaraModule(
     FoundNode->BreakAllNodeLinks();
     OwningGraph->RemoveNode(FoundNode);
 
-    System->RequestCompile(false);
-    System->MarkPackageDirty();
+    if (!bBatchMode)
+    {
+        System->RequestCompile(false);
+        System->MarkPackageDirty();
+    }
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetBoolField(TEXT("success"), true);
@@ -2017,9 +2031,11 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraSetParameter(
         TypeDef = FNiagaraTypeDefinition::GetVec4Def();
     else if (ParamType.Equals(TEXT("position"), ESearchCase::IgnoreCase))
         TypeDef = FNiagaraTypeDefinition::GetPositionDef();
+    else if (ParamType.Equals(TEXT("NiagaraID"), ESearchCase::IgnoreCase) || ParamType.Equals(TEXT("id"), ESearchCase::IgnoreCase))
+        TypeDef = FNiagaraTypeDefinition::GetIDDef();
     else
         return FUnrealMCPCommonUtils::CreateErrorResponse(
-            FString::Printf(TEXT("Unsupported param_type: %s (use int, float, bool, vec2, vec3, vec4, position, color)"), *ParamType));
+            FString::Printf(TEXT("Unsupported param_type: %s (use int, float, bool, vec2, vec3, vec4, position, color, NiagaraID)"), *ParamType));
 
     FNiagaraVariable Variable(TypeDef, FName(*ParamName));
 
@@ -2081,8 +2097,11 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraSetParameter(
     if (!AssignNode)
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to add parameter assignment node"));
 
-    System->RequestCompile(false);
-    System->MarkPackageDirty();
+    if (!bBatchMode)
+    {
+        System->RequestCompile(false);
+        System->MarkPackageDirty();
+    }
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetBoolField(TEXT("success"), true);
@@ -4987,5 +5006,138 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleMoveNiagaraRenderer(
     Result->SetStringField(TEXT("status"), TEXT("success"));
     Result->SetNumberField(TEXT("from_index"), RendererIndex);
     Result->SetNumberField(TEXT("to_index"), NewIndex);
+    return Result;
+}
+
+// --- link_niagara_module_input: link a module's input to a particle attribute via ViewModel ---
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleLinkNiagaraModuleInput(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    // This command is delegated to the ViewModel handler since it needs
+    // UNiagaraStackFunctionInput::SetLinkedParameterValue which requires
+    // a ViewModel context. Forward to the bridge for VM handling.
+
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString ModuleName;
+    if (!Params->TryGetStringField(TEXT("module_name"), ModuleName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'module_name'"));
+
+    FString InputName;
+    if (!Params->TryGetStringField(TEXT("input_name"), InputName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'input_name'"));
+
+    FString LinkedParam;
+    if (!Params->TryGetStringField(TEXT("linked_parameter"), LinkedParam))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'linked_parameter'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystem(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    // Use ViewModel to find the input and set its linked value
+    TSharedPtr<FNiagaraSystemViewModel> VM = MakeShared<FNiagaraSystemViewModel>();
+    FNiagaraSystemViewModelOptions Options;
+    Options.bIsForDataProcessingOnly = false;
+    Options.bCanAutoCompile = false;
+    Options.bCanSimulate = false;
+    Options.bCanModifyEmittersFromTimeline = false;
+    Options.MessageLogGuid = FGuid::NewGuid();
+    VM->Initialize(*System, Options);
+
+    // Find the input via the same logic as the VM commands
+    const auto& EmitterVMs = VM->GetEmitterHandleViewModels();
+    if (!EmitterVMs.IsValidIndex(EmitterIndex))
+    {
+        try { VM->ResetStack(); } catch (...) {}
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+    }
+
+    UNiagaraStackViewModel* StackVM = EmitterVMs[EmitterIndex]->GetEmitterStackViewModel();
+    if (!StackVM)
+    {
+        try { VM->ResetStack(); } catch (...) {}
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No stack ViewModel"));
+    }
+
+    // Walk tree to find module
+    FString NormModSearch = ModuleName.Replace(TEXT(" "), TEXT("")).ToLower();
+    TQueue<UNiagaraStackEntry*> Queue;
+    Queue.Enqueue(StackVM->GetRootEntry());
+    UNiagaraStackModuleItem* FoundModule = nullptr;
+    while (!Queue.IsEmpty())
+    {
+        UNiagaraStackEntry* Entry;
+        Queue.Dequeue(Entry);
+        if (!Entry) continue;
+        if (UNiagaraStackModuleItem* Module = Cast<UNiagaraStackModuleItem>(Entry))
+        {
+            FString NormDisplay = Module->GetDisplayName().ToString().Replace(TEXT(" "), TEXT("")).ToLower();
+            if (NormDisplay == NormModSearch || NormDisplay.Find(NormModSearch) != INDEX_NONE)
+            {
+                FoundModule = Module;
+                break;
+            }
+        }
+        TArray<UNiagaraStackEntry*> Children;
+        Entry->GetUnfilteredChildren(Children);
+        for (UNiagaraStackEntry* Child : Children)
+            Queue.Enqueue(Child);
+    }
+
+    if (!FoundModule)
+    {
+        try { VM->ResetStack(); } catch (...) {}
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Module '%s' not found"), *ModuleName));
+    }
+
+    // Find the input by name
+    FoundModule->RefreshChildren();
+    TArray<UNiagaraStackFunctionInput*> Inputs;
+    FoundModule->GetParameterInputs(Inputs);
+
+    UNiagaraStackFunctionInput* FoundInput = nullptr;
+    for (UNiagaraStackFunctionInput* Input : Inputs)
+    {
+        if (Input->GetDisplayName().ToString().Equals(InputName, ESearchCase::IgnoreCase))
+        {
+            FoundInput = Input;
+            break;
+        }
+    }
+
+    if (!FoundInput)
+    {
+        TArray<FString> AvailInputs;
+        for (UNiagaraStackFunctionInput* Input : Inputs)
+            AvailInputs.Add(Input->GetDisplayName().ToString());
+        try { VM->ResetStack(); } catch (...) {}
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Input '%s' not found. Available: [%s]"),
+                *InputName, *FString::Join(AvailInputs, TEXT(", "))));
+    }
+
+    // Create the linked parameter and set it
+    FNiagaraVariable LinkedVariable(FoundInput->GetInputType(), FName(*LinkedParam));
+    FoundInput->SetLinkedParameterValue(LinkedVariable);
+
+    System->MarkPackageDirty();
+    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+
+    try { VM->ResetStack(); } catch (...) {}
+    VM.Reset();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("status"), TEXT("success"));
+    Result->SetStringField(TEXT("module"), ModuleName);
+    Result->SetStringField(TEXT("input"), InputName);
+    Result->SetStringField(TEXT("linked_to"), LinkedParam);
     return Result;
 }

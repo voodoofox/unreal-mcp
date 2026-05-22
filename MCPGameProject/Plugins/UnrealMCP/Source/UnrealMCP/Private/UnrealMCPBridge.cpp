@@ -385,7 +385,8 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("remove_niagara_parameter_collection_param") ||
                      CommandType == TEXT("create_niagara_scratch_pad_script") ||
                      CommandType == TEXT("delete_niagara_scratch_pad_script") ||
-                     CommandType == TEXT("move_niagara_renderer"))
+                     CommandType == TEXT("move_niagara_renderer") ||
+                     CommandType == TEXT("link_niagara_module_input"))
             {
                 ResultJson = Self->NiagaraCommands->HandleCommand(CommandType, Params);
             }
