@@ -48,7 +48,6 @@ TSharedPtr<FNiagaraSystemViewModel> FUnrealMCPNiagaraViewModelCommands::GetOrCre
 {
     if (!System) return nullptr;
 
-    // Create a fresh ViewModel each time (no caching — avoids conflicts with editor's own ViewModel)
     TSharedPtr<FNiagaraSystemViewModel> VM;
     try
     {
@@ -67,8 +66,24 @@ TSharedPtr<FNiagaraSystemViewModel> FUnrealMCPNiagaraViewModelCommands::GetOrCre
         return nullptr;
     }
 
-    // Don't cache — destroy after each use to avoid conflicts with the Niagara editor's own ViewModel
     return VM;
+}
+
+static void SafeReleaseViewModel(TSharedPtr<FNiagaraSystemViewModel>& VM)
+{
+    if (!VM) return;
+    try
+    {
+        VM->ResetStack();
+    }
+    catch (...) {}
+    VM.Reset();
+}
+
+// Helper: normalize module name for matching ("SpawnRate" matches "Spawn Rate")
+static FString NormalizeModuleName(const FString& Name)
+{
+    return Name.Replace(TEXT(" "), TEXT("")).ToLower();
 }
 
 void FUnrealMCPNiagaraViewModelCommands::CollectInputs(
@@ -121,7 +136,8 @@ UNiagaraStackFunctionInput* FUnrealMCPNiagaraViewModelCommands::FindInput(
             Queue.Enqueue(Child);
     }
 
-    // Find the module by name
+    // Find the module by name (supports both "SpawnRate" and "Spawn Rate")
+    FString NormalizedSearch = NormalizeModuleName(ModuleName);
     UNiagaraStackModuleItem* FoundModule = nullptr;
     for (UNiagaraStackEntry* Entry : AllEntries)
     {
@@ -129,7 +145,16 @@ UNiagaraStackFunctionInput* FUnrealMCPNiagaraViewModelCommands::FindInput(
         if (!Module) continue;
 
         FString DisplayName = Module->GetDisplayName().ToString();
-        if (DisplayName.Find(ModuleName) != INDEX_NONE)
+        FString NormalizedDisplay = NormalizeModuleName(DisplayName);
+
+        // Exact normalized match first
+        if (NormalizedDisplay == NormalizedSearch)
+        {
+            FoundModule = Module;
+            break;
+        }
+        // Substring match fallback
+        if (NormalizedDisplay.Find(NormalizedSearch) != INDEX_NONE)
         {
             FoundModule = Module;
             break;
@@ -311,6 +336,7 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMSetIn
     Result->SetStringField(TEXT("value"), Value);
     Result->SetStringField(TEXT("type"), InputType.GetName());
     Result->SetBoolField(TEXT("is_static_parameter"), Input->IsStaticParameter());
+    SafeReleaseViewModel(VM);
     return Result;
 }
 
@@ -348,19 +374,27 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMGetIn
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No stack ViewModel"));
 
     // Walk tree to find the module
+    UNiagaraStackEntry* RootEntry = StackVM->GetRootEntry();
     TQueue<UNiagaraStackEntry*> Queue;
-    Queue.Enqueue(StackVM->GetRootEntry());
+    Queue.Enqueue(RootEntry);
     UNiagaraStackModuleItem* FoundModule = nullptr;
+    TArray<FString> FoundModuleNames;
+    int32 TotalEntries = 0;
 
     while (!Queue.IsEmpty())
     {
         UNiagaraStackEntry* Entry;
         Queue.Dequeue(Entry);
         if (!Entry) continue;
+        TotalEntries++;
 
         if (UNiagaraStackModuleItem* Module = Cast<UNiagaraStackModuleItem>(Entry))
         {
-            if (Module->GetDisplayName().ToString().Find(ModuleName) != INDEX_NONE)
+            FString DisplayName = Module->GetDisplayName().ToString();
+            FoundModuleNames.Add(DisplayName);
+            FString NormalizedDisplay = NormalizeModuleName(DisplayName);
+            FString NormalizedSearch = NormalizeModuleName(ModuleName);
+            if (NormalizedDisplay == NormalizedSearch || NormalizedDisplay.Find(NormalizedSearch) != INDEX_NONE)
             {
                 FoundModule = Module;
                 break;
@@ -374,8 +408,15 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMGetIn
     }
 
     if (!FoundModule)
+    {
+        FString AvailableModules = FString::Join(FoundModuleNames, TEXT(", "));
         return FUnrealMCPCommonUtils::CreateErrorResponse(
-            FString::Printf(TEXT("Module '%s' not found"), *ModuleName));
+            FString::Printf(TEXT("Module '%s' not found. Root=%s, TotalEntries=%d, Modules=[%s]"),
+                *ModuleName,
+                RootEntry ? *RootEntry->GetDisplayName().ToString() : TEXT("null"),
+                TotalEntries,
+                *AvailableModules));
+    }
 
     // Get all parameter inputs via the proper ViewModel API
     TArray<UNiagaraStackFunctionInput*> Inputs;
@@ -442,6 +483,7 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMGetIn
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("module"), FoundModule->GetDisplayName().ToString());
     Result->SetArrayField(TEXT("inputs"), InputArray);
+    SafeReleaseViewModel(VM);
     return Result;
 }
 
@@ -513,5 +555,6 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMSetDy
     Result->SetStringField(TEXT("module"), ModuleName);
     Result->SetStringField(TEXT("input"), Input->GetDisplayName().ToString());
     Result->SetStringField(TEXT("dynamic_input"), DynScript->GetName());
+    SafeReleaseViewModel(VM);
     return Result;
 }

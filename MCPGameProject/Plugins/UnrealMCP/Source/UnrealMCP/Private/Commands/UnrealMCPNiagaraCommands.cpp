@@ -1417,7 +1417,11 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraModule(
     Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
 
     FString ScriptType = TEXT("ParticleSpawn");
-    Params->TryGetStringField(TEXT("script_type"), ScriptType);
+    if (!Params->TryGetStringField(TEXT("script_type"), ScriptType))
+        Params->TryGetStringField(TEXT("stage"), ScriptType);
+    // Accept common abbreviations
+    if (ScriptType.Equals(TEXT("Particle"), ESearchCase::IgnoreCase)) ScriptType = TEXT("ParticleSpawn");
+    if (ScriptType.Equals(TEXT("Emitter"), ESearchCase::IgnoreCase)) ScriptType = TEXT("EmitterUpdate");
 
     FString ModulePath;
     if (!Params->TryGetStringField(TEXT("module_path"), ModulePath))
@@ -4467,13 +4471,17 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleBatchNiagaraCommands(
             continue;
         }
 
-        // Get params, inject system_path if not present
-        TSharedPtr<FJsonObject> CmdParams;
+        // Build params: start with sub-command params, inject system_path and emitter_index
+        TSharedPtr<FJsonObject> CmdParams = MakeShared<FJsonObject>();
         const TSharedPtr<FJsonObject>* ParamsPtr = nullptr;
-        if (CmdObj->TryGetObjectField(TEXT("params"), ParamsPtr) && ParamsPtr)
-            CmdParams = *ParamsPtr;
-        else
-            CmdParams = MakeShared<FJsonObject>();
+        if (CmdObj->TryGetObjectField(TEXT("params"), ParamsPtr) && ParamsPtr && ParamsPtr->IsValid())
+        {
+            // Copy all fields from sub-command params
+            for (auto& Pair : (*ParamsPtr)->Values)
+            {
+                CmdParams->SetField(Pair.Key, Pair.Value);
+            }
+        }
         if (!CmdParams->HasField(TEXT("system_path")))
             CmdParams->SetStringField(TEXT("system_path"), SystemPath);
 
