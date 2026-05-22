@@ -379,7 +379,13 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("batch_niagara_commands") ||
                      CommandType == TEXT("set_niagara_stateless_module_property") ||
                      CommandType == TEXT("get_niagara_parameter_collection") ||
-                     CommandType == TEXT("set_niagara_parameter_collection_value"))
+                     CommandType == TEXT("set_niagara_parameter_collection_value") ||
+                     CommandType == TEXT("create_niagara_parameter_collection") ||
+                     CommandType == TEXT("add_niagara_parameter_collection_param") ||
+                     CommandType == TEXT("remove_niagara_parameter_collection_param") ||
+                     CommandType == TEXT("create_niagara_scratch_pad_script") ||
+                     CommandType == TEXT("delete_niagara_scratch_pad_script") ||
+                     CommandType == TEXT("move_niagara_renderer"))
             {
                 ResultJson = Self->NiagaraCommands->HandleCommand(CommandType, Params);
             }

@@ -100,5 +100,12 @@ private:
     TSharedPtr<FJsonObject> HandleGetNiagaraParameterCollection(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetNiagaraParameterCollectionValue(const TSharedPtr<FJsonObject>& Params);
 
+    TSharedPtr<FJsonObject> HandleCreateNiagaraParameterCollection(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleAddNiagaraParameterCollectionParam(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleRemoveNiagaraParameterCollectionParam(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleCreateNiagaraScratchPadScript(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleDeleteNiagaraScratchPadScript(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleMoveNiagaraRenderer(const TSharedPtr<FJsonObject>& Params);
+
     bool bBatchMode = false;
 };
