@@ -39,6 +39,7 @@
 #include "ViewModels/Stack/NiagaraStackFunctionInput.h"
 #include "NiagaraScriptFactoryNew.h"
 #include "NiagaraNodeCustomHlsl.h"
+#include "EdGraphSchema_Niagara.h"
 #include "NiagaraEffectType.h"
 #include "NiagaraParameterCollection.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -3980,13 +3981,69 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraHlslModule
     if (!Graph)
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("New module has no graph"));
 
+    // Remove all default nodes created by the factory
+    // The Custom HLSL node will be the sole content node
+    TArray<UEdGraphNode*> NodesToRemove;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node) NodesToRemove.Add(Node);
+    }
+    for (UEdGraphNode* Node : NodesToRemove)
+    {
+        Node->BreakAllNodeLinks();
+        Graph->RemoveNode(Node);
+    }
+
+    // Create fresh Output node for the module
+    FGraphNodeCreator<UNiagaraNodeOutput> OutputCreator(*Graph);
+    UNiagaraNodeOutput* OutputNode = OutputCreator.CreateNode();
+    OutputNode->SetUsage(Script->GetUsage());
+    OutputNode->SetUsageId(Script->GetUsageId());
+    OutputNode->Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("Out")));
+    OutputCreator.Finalize();
+
+    // Create fresh Input node
+    FGraphNodeCreator<UNiagaraNodeInput> InputCreator(*Graph);
+    UNiagaraNodeInput* InputNode = InputCreator.CreateNode();
+    InputNode->Input = FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("InputMap"));
+    InputNode->Usage = ENiagaraInputNodeUsage::Parameter;
+    InputCreator.Finalize();
+
     // Create the Custom HLSL node
     FGraphNodeCreator<UNiagaraNodeCustomHlsl> Creator(*Graph);
     UNiagaraNodeCustomHlsl* CustomNode = Creator.CreateNode();
+    CustomNode->ScriptUsage = Script->GetUsage();
     Creator.Finalize();
 
     // Set HLSL via reflection (SetCustomHlsl is not exported)
+    // Log ALL properties on the CustomHlsl node class
+    UE_LOG(LogTemp, Display, TEXT("MCP HLSL: Node class: %s"), *CustomNode->GetClass()->GetName());
+    for (TFieldIterator<FProperty> PropIt(CustomNode->GetClass(), EFieldIterationFlags::IncludeSuper); PropIt; ++PropIt)
+    {
+        FProperty* P = *PropIt;
+        if (P->GetOwnerClass() == CustomNode->GetClass() || P->GetName().Contains(TEXT("Hlsl")) || P->GetName().Contains(TEXT("Custom")))
+        {
+            UE_LOG(LogTemp, Display, TEXT("MCP HLSL: Property: %s type=%s"), *P->GetName(), *P->GetCPPType());
+        }
+    }
+
     FProperty* HlslProp = CustomNode->GetClass()->FindPropertyByName(TEXT("CustomHlsl"));
+    if (!HlslProp)
+    {
+        // Try alternative names
+        for (TFieldIterator<FProperty> PropIt(CustomNode->GetClass()); PropIt; ++PropIt)
+        {
+            if (PropIt->GetName().Contains(TEXT("Hlsl")) || PropIt->GetName().Contains(TEXT("HLSL")) ||
+                PropIt->GetName().Contains(TEXT("Code")) || PropIt->GetName().Contains(TEXT("Custom")))
+            {
+                HlslProp = *PropIt;
+                UE_LOG(LogTemp, Display, TEXT("MCP HLSL: Using alt property: %s"), *HlslProp->GetName());
+                break;
+            }
+        }
+    }
+
+    bool bHlslSet = false;
     if (HlslProp)
     {
         FStrProperty* StrProp = CastField<FStrProperty>(HlslProp);
@@ -3994,11 +4051,112 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraHlslModule
         {
             CustomNode->Modify();
             StrProp->SetPropertyValue(StrProp->ContainerPtrToValuePtr<void>(CustomNode), Hlsl);
+            bHlslSet = true;
+
+            // Verify
+            FString ReadBack = StrProp->GetPropertyValue(StrProp->ContainerPtrToValuePtr<void>(CustomNode));
+            UE_LOG(LogTemp, Display, TEXT("MCP HLSL: Set %d chars, readback %d chars, match=%d"),
+                Hlsl.Len(), ReadBack.Len(), Hlsl == ReadBack);
         }
     }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("MCP HLSL: No HLSL property found on class %s"), *CustomNode->GetClass()->GetName());
+    }
 
-    // Reconstruct to parse HLSL and auto-generate pins
+    // UE5.7: Custom HLSL node pins must be created explicitly AND registered
+    // in the node's Signature (FNiagaraFunctionSignature). The compiler's
+    // BuildParameterMapHistory checks Signature.Inputs/Outputs count vs pin count.
+    // Without Signature entries, the compiler skips parameter map registration.
     CustomNode->ReconstructNode();
+
+    // Clear Signature - only DATA variables go here (not ParameterMap)
+    // BuildParameterMapHistory checks: InputPins.Num() == Signature.Inputs.Num() + 1
+    // The +1 accounts for the "Add" pin. ParameterMap is handled by the graph system.
+    CustomNode->Signature.Inputs.Empty();
+    CustomNode->Signature.Outputs.Empty();
+
+    // Parse HLSL variable declarations and create BOTH pins AND Signature entries
+    TArray<FString> Lines;
+    Hlsl.ParseIntoArrayLines(Lines);
+    int32 PinsCreated = 0;
+    for (const FString& Line : Lines)
+    {
+        FString Trimmed = Line.TrimStartAndEnd();
+        if (Trimmed.IsEmpty() || Trimmed.StartsWith(TEXT("//"))) continue;
+
+        bool bIsOutput = Trimmed.StartsWith(TEXT("out "));
+        FString Decl = bIsOutput ? Trimmed.Mid(4).TrimStart() : Trimmed;
+
+        FString TypeStr, NameStr;
+        int32 SpaceIdx;
+        if (!Decl.FindChar(' ', SpaceIdx)) continue;
+        TypeStr = Decl.Left(SpaceIdx).TrimStartAndEnd();
+        NameStr = Decl.Mid(SpaceIdx + 1).TrimStartAndEnd();
+        int32 SemiIdx;
+        if (NameStr.FindChar(';', SemiIdx)) NameStr = NameStr.Left(SemiIdx).TrimEnd();
+        int32 EqIdx;
+        if (NameStr.FindChar('=', EqIdx)) NameStr = NameStr.Left(EqIdx).TrimEnd();
+        if (NameStr.Contains(TEXT("(")) || NameStr.Contains(TEXT(".")) || NameStr.Contains(TEXT("["))) continue;
+
+        FNiagaraTypeDefinition TypeDef;
+        if (TypeStr == TEXT("float")) TypeDef = FNiagaraTypeDefinition::GetFloatDef();
+        else if (TypeStr == TEXT("float3") || TypeStr == TEXT("Vector3f")) TypeDef = FNiagaraTypeDefinition::GetVec3Def();
+        else if (TypeStr == TEXT("float4") || TypeStr == TEXT("Vector4f")) TypeDef = FNiagaraTypeDefinition::GetVec4Def();
+        else if (TypeStr == TEXT("float2") || TypeStr == TEXT("Vector2f")) TypeDef = FNiagaraTypeDefinition::GetVec2Def();
+        else if (TypeStr == TEXT("int") || TypeStr == TEXT("int32")) TypeDef = FNiagaraTypeDefinition::GetIntDef();
+        else if (TypeStr == TEXT("bool")) TypeDef = FNiagaraTypeDefinition::GetBoolDef();
+        else continue;
+
+        // Create the pin with correct Niagara type
+        FEdGraphPinType PinType = UEdGraphSchema_Niagara::TypeDefinitionToPinType(TypeDef);
+        EEdGraphPinDirection Dir = bIsOutput ? EGPD_Output : EGPD_Input;
+        UEdGraphPin* NewPin = CustomNode->CreatePin(Dir, PinType, FName(*NameStr));
+
+        // Register in Signature (THE KEY - compiler reads this)
+        FNiagaraVariable Var(TypeDef, FName(*NameStr));
+        if (bIsOutput)
+            CustomNode->Signature.Outputs.Add(Var);
+        else
+            CustomNode->Signature.Inputs.Add(Var);
+
+        if (NewPin) PinsCreated++;
+    }
+
+    // Create explicit ParameterMap input/output pins on the CustomHlsl node
+    FEdGraphPinType MapPinType = UEdGraphSchema_Niagara::TypeDefinitionToPinType(
+        FNiagaraTypeDefinition::GetParameterMapDef());
+    UEdGraphPin* MapInPin = CustomNode->CreatePin(EGPD_Input, MapPinType, TEXT("InputMap"));
+    UEdGraphPin* MapOutPin = CustomNode->CreatePin(EGPD_Output, MapPinType, TEXT("OutputMap"));
+
+    // Add ParameterMap to Signature (these ARE needed in Signature for the map flow)
+    CustomNode->Signature.Inputs.Insert(FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("InputMap")), 0);
+    CustomNode->Signature.Outputs.Insert(FNiagaraVariable(FNiagaraTypeDefinition::GetParameterMapDef(), TEXT("OutputMap")), 0);
+
+    CustomNode->MarkNodeRequiresSynchronization(TEXT("MCP_SetCustomHlsl"), true);
+    UE_LOG(LogTemp, Display, TEXT("MCP HLSL: %d data pins, Sig.In=%d Sig.Out=%d, total pins=%d"),
+        PinsCreated, CustomNode->Signature.Inputs.Num(), CustomNode->Signature.Outputs.Num(), CustomNode->Pins.Num());
+
+    // Wire: InputNode → CustomHLSL.InputMap, CustomHLSL.OutputMap → OutputNode
+    UEdGraphPin* InputOut = InputNode->Pins.Num() > 0 ? InputNode->Pins[0] : nullptr;
+    UEdGraphPin* OutputIn = nullptr;
+    for (UEdGraphPin* Pin : OutputNode->Pins)
+    {
+        if (Pin && Pin->Direction == EGPD_Input) { OutputIn = Pin; break; }
+    }
+
+    if (InputOut && OutputIn && MapInPin && MapOutPin)
+    {
+        InputOut->MakeLinkTo(MapInPin);
+        MapOutPin->MakeLinkTo(OutputIn);
+        UE_LOG(LogTemp, Display, TEXT("MCP: Wired HLSL: Input→InputMap→OutputMap→Output"));
+    }
+    else if (InputOut && OutputIn)
+    {
+        InputOut->MakeLinkTo(OutputIn);
+        UE_LOG(LogTemp, Warning, TEXT("MCP: Fallback direct Input→Output"));
+    }
+
     CustomNode->PostEditChange();
     Graph->NotifyGraphChanged();
 
