@@ -5,14 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.5%2B-orange)](https://www.unrealengine.com)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-yellow)](https://www.python.org)
-[![Tools](https://img.shields.io/badge/Tools-120%2B-green)]()
-[![Niagara](https://img.shields.io/badge/Niagara-65_commands-purple)]()
+[![Tools](https://img.shields.io/badge/Tools-130%2B-green)]()
+[![Niagara](https://img.shields.io/badge/Niagara-70_commands-purple)]()
 
 **Control Unreal Engine from AI assistants via the Model Context Protocol**
 
 </div>
 
-Unreal MCP lets AI assistants (Claude Code, Cursor, Windsurf, Claude Desktop) control the Unreal Editor through natural language. 120+ tools across 11 categories, including the deepest Niagara VFX integration (65 commands) of any MCP plugin.
+Unreal MCP lets AI assistants (Claude Code, Cursor, Windsurf, Claude Desktop) control the Unreal Editor through natural language. 130+ tools across 11 categories, including the deepest Niagara VFX integration (70 commands) of any MCP plugin. Custom HLSL module creation, ViewModel-based parameter control, dynamic inputs, and batch operations.
 
 ## What Can It Do?
 
@@ -22,7 +22,7 @@ Unreal MCP lets AI assistants (Claude Code, Cursor, Windsurf, Claude Desktop) co
 | **Blueprint Development** | 7 | Create blueprints, add components, set properties, compile |
 | **Blueprint Graph Editing** | 16 | Add nodes, variables, events, connections, control flow |
 | **Materials & Inspection** | 20 | Create/wire materials, inspect assets, Nanite control |
-| **Niagara VFX** | 65 | System/emitter/module/renderer control, curve keypoint editing, DI properties, simulation stages, event handlers, scratch pad HLSL, parameter collections, batch ops, system spec export/import, scalability, stateless emitters |
+| **Niagara VFX** | 70 | System/emitter/module/renderer control, curve keypoint editing, DI properties, simulation stages, event handlers, scratch pad HLSL, Custom HLSL module creation, parameter collections, batch ops, system spec export/import, scalability, stateless emitters, ViewModel parameter control, dynamic inputs, module input linking |
 | **UMG Widgets** | 6 | Create widget blueprints, buttons, text blocks, bindings |
 | **Animation** | 7 | Inspect sequences, montages, skeleton bone hierarchy |
 | **Audio** | 6 | Inspect sound waves, cues, attenuation, play sounds |
