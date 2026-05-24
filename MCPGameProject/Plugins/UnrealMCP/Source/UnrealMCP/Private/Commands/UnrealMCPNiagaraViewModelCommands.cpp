@@ -16,6 +16,10 @@
 #include "ViewModels/Stack/NiagaraStackFunctionInput.h"
 #include "ViewModels/Stack/NiagaraStackRoot.h"
 
+#include "NiagaraNodeFunctionCall.h"
+#include "NiagaraScriptSource.h"
+#include "NiagaraGraph.h"
+#include "EdGraphSchema_Niagara.h"
 #include "EditorAssetLibrary.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/StructOnScope.h"
@@ -48,6 +52,15 @@ TSharedPtr<FNiagaraSystemViewModel> FUnrealMCPNiagaraViewModelCommands::GetOrCre
 {
     if (!System) return nullptr;
 
+    // Disable traversal cache so ViewModel reads live graph data (not stale cache)
+    static IConsoleVariable* TraversalCacheCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("fx.Niagara.EnableTraversalCache"));
+    int32 OldValue = 1;
+    if (TraversalCacheCVar)
+    {
+        OldValue = TraversalCacheCVar->GetInt();
+        TraversalCacheCVar->Set(0);
+    }
+
     TSharedPtr<FNiagaraSystemViewModel> VM;
     try
     {
@@ -63,9 +76,11 @@ TSharedPtr<FNiagaraSystemViewModel> FUnrealMCPNiagaraViewModelCommands::GetOrCre
     catch (...)
     {
         UE_LOG(LogTemp, Error, TEXT("MCP: FNiagaraSystemViewModel creation/init crashed"));
+        if (TraversalCacheCVar) TraversalCacheCVar->Set(OldValue);
         return nullptr;
     }
 
+    if (TraversalCacheCVar) TraversalCacheCVar->Set(OldValue);
     return VM;
 }
 
@@ -250,8 +265,80 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMSetIn
 
     UNiagaraStackFunctionInput* Input = FindInput(VM, EmitterIndex, TEXT(""), ModuleName, InputName);
     if (!Input)
-        return FUnrealMCPCommonUtils::CreateErrorResponse(
-            FString::Printf(TEXT("Input '%s' not found on module '%s'"), *InputName, *ModuleName));
+    {
+        // Pin fallback: find the FunctionCall node directly and set pin default
+        SafeReleaseViewModel(VM);
+
+        const TArray<FNiagaraEmitterHandle>& Handles = System->GetEmitterHandles();
+        if (!Handles.IsValidIndex(EmitterIndex))
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
+
+        FVersionedNiagaraEmitterData* EmData = Handles[EmitterIndex].GetInstance().GetEmitterData();
+        if (!EmData)
+            return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No emitter data"));
+
+        // Search emitter scripts for our module's FunctionCall
+        UNiagaraNodeFunctionCall* FoundFunc = nullptr;
+        FString NormSearch = NormalizeModuleName(ModuleName);
+        TArray<ENiagaraScriptUsage> Usages = {
+            ENiagaraScriptUsage::ParticleSpawnScript,
+            ENiagaraScriptUsage::ParticleUpdateScript,
+            ENiagaraScriptUsage::EmitterSpawnScript,
+            ENiagaraScriptUsage::EmitterUpdateScript
+        };
+        for (ENiagaraScriptUsage Usage : Usages)
+        {
+            if (FoundFunc) break;
+            UNiagaraScript* Script = EmData->GetScript(Usage, FGuid());
+            if (!Script) continue;
+            UNiagaraScriptSource* ScriptSrc = Cast<UNiagaraScriptSource>(Script->GetLatestSource());
+            if (!ScriptSrc || !ScriptSrc->NodeGraph) continue;
+
+            TArray<UNiagaraNodeFunctionCall*> FuncNodes;
+            ScriptSrc->NodeGraph->GetNodesOfClass(FuncNodes);
+            for (UNiagaraNodeFunctionCall* FN : FuncNodes)
+            {
+                FString Title = FN->GetNodeTitle(ENodeTitleType::ListView).ToString();
+                if (NormalizeModuleName(Title) == NormSearch || NormalizeModuleName(Title).Find(NormSearch) != INDEX_NONE)
+                {
+                    FoundFunc = FN;
+                    break;
+                }
+            }
+        }
+
+        if (!FoundFunc)
+            return FUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Input '%s' not found on module '%s' (pin fallback: module not found)"), *InputName, *ModuleName));
+
+        UEdGraphPin* TargetPin = nullptr;
+        for (UEdGraphPin* Pin : FoundFunc->Pins)
+        {
+            if (Pin && Pin->Direction == EGPD_Input && Pin->PinName.ToString() == InputName)
+            {
+                TargetPin = Pin;
+                break;
+            }
+        }
+
+        if (!TargetPin)
+            return FUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Pin '%s' not found on module '%s'"), *InputName, *ModuleName));
+
+        TargetPin->DefaultValue = Value;
+        FoundFunc->GetGraph()->NotifyGraphChanged();
+        System->RequestCompile(false);
+        System->MarkPackageDirty();
+        UEditorAssetLibrary::SaveAsset(System->GetPathName());
+
+        TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+        Result->SetBoolField(TEXT("success"), true);
+        Result->SetStringField(TEXT("module"), ModuleName);
+        Result->SetStringField(TEXT("input"), InputName);
+        Result->SetStringField(TEXT("value"), Value);
+        Result->SetStringField(TEXT("source"), TEXT("pin_fallback"));
+        return Result;
+    }
 
     // Get the input type
     const FNiagaraTypeDefinition& InputType = Input->GetInputType();
@@ -373,6 +460,27 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMGetIn
     if (!StackVM)
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No stack ViewModel"));
 
+    // Force a full recursive refresh so children are populated
+    StackVM->GetRootEntry()->RefreshChildren();
+    {
+        TArray<UNiagaraStackEntry*> TopChildren;
+        StackVM->GetRootEntry()->GetUnfilteredChildren(TopChildren);
+        for (UNiagaraStackEntry* C : TopChildren)
+        {
+            C->RefreshChildren();
+            TArray<UNiagaraStackEntry*> Sub;
+            C->GetUnfilteredChildren(Sub);
+            for (UNiagaraStackEntry* S : Sub)
+            {
+                S->RefreshChildren();
+                TArray<UNiagaraStackEntry*> Sub2;
+                S->GetUnfilteredChildren(Sub2);
+                for (UNiagaraStackEntry* S2 : Sub2)
+                    S2->RefreshChildren();
+            }
+        }
+    }
+
     // Walk tree to find the module
     UNiagaraStackEntry* RootEntry = StackVM->GetRootEntry();
     TQueue<UNiagaraStackEntry*> Queue;
@@ -423,6 +531,39 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMGetIn
     FoundModule->GetParameterInputs(Inputs);
 
     TArray<TSharedPtr<FJsonValue>> InputArray;
+
+    // Fallback: if ViewModel returns no inputs, read directly from FunctionCall pins
+    if (Inputs.Num() == 0)
+    {
+        UNiagaraNodeFunctionCall& FuncNode = FoundModule->GetModuleNode();
+        const UEdGraphSchema_Niagara* Schema = GetDefault<UEdGraphSchema_Niagara>();
+        for (UEdGraphPin* Pin : FuncNode.Pins)
+        {
+            if (!Pin || Pin->Direction != EGPD_Input) continue;
+            FNiagaraTypeDefinition PinType = Schema->PinToTypeDefinition(Pin);
+            if (PinType == FNiagaraTypeDefinition::GetParameterMapDef()) continue;
+
+            TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
+            InputObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+            InputObj->SetStringField(TEXT("type"), PinType.GetName());
+            InputObj->SetBoolField(TEXT("is_static_parameter"), false);
+            InputObj->SetStringField(TEXT("value_mode"), TEXT("Local"));
+            if (!Pin->DefaultValue.IsEmpty())
+                InputObj->SetStringField(TEXT("value"), Pin->DefaultValue);
+            InputArray.Add(MakeShared<FJsonValueObject>(InputObj));
+        }
+
+        if (InputArray.Num() > 0)
+        {
+            TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+            Result->SetStringField(TEXT("module"), FoundModule->GetDisplayName().ToString());
+            Result->SetStringField(TEXT("source"), TEXT("pin_fallback"));
+            Result->SetArrayField(TEXT("inputs"), InputArray);
+            SafeReleaseViewModel(VM);
+            return Result;
+        }
+    }
+
     for (UNiagaraStackFunctionInput* Input : Inputs)
     {
         TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();

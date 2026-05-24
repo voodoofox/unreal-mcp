@@ -39,4 +39,5 @@ private:
     TSharedPtr<FJsonObject> HandleRenameAsset(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleDeleteAssetCommand(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleRunPythonInUnreal(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleSearchOutputLog(const TSharedPtr<FJsonObject>& Params);
 };

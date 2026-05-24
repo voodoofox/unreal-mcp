@@ -97,6 +97,33 @@ print(screenshot_response)
 - **Actor not found**: Verify that the actor name is correct and the actor exists in the current level.
 - **Invalid parameters**: Ensure that location and orientation arrays contain exactly 3 values (X, Y, Z for location; Pitch, Yaw, Roll for orientation).
 
+### search_output_log
+
+Search the Unreal Editor output log by regex pattern.
+
+**Parameters:**
+- `pattern` (string, required) - Regex pattern to match against log lines
+- `max_lines` (integer, optional) - Maximum number of matching lines to return (default: 50)
+
+**Returns:**
+- Array of matching log lines
+
+**Example:**
+```json
+{
+  "command": "search_output_log",
+  "params": {
+    "pattern": "Error|Warning",
+    "max_lines": 20
+  }
+}
+```
+
+## Notes
+
+### delete_asset Safety
+The `delete_asset` command (in project tools) now closes any open asset editors and forces garbage collection before deletion. This prevents the `TickTaskLevel` assertion crash that occurred when deleting assets with open editors.
+
 ## Future Enhancements
 
 - Support for setting viewport display mode (wireframe, lit, etc.)

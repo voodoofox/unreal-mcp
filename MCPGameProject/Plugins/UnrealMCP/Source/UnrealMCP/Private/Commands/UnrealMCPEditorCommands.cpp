@@ -18,6 +18,7 @@
 #include "Camera/CameraActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "EditorSubsystem.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "Subsystems/EditorActorSubsystem.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
@@ -100,6 +101,10 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleCommand(const FString& C
     else if (CommandType == TEXT("run_python_in_unreal"))
     {
         return HandleRunPythonInUnreal(Params);
+    }
+    else if (CommandType == TEXT("search_output_log"))
+    {
+        return HandleSearchOutputLog(Params);
     }
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown editor command: %s"), *CommandType));
@@ -755,6 +760,15 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleDeleteAssetCommand(const
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
     }
 
+    // Close any editor that has this asset open (prevents TickTaskLevel crash)
+    UObject* AssetObj = UEditorAssetLibrary::LoadAsset(AssetPath);
+    if (AssetObj)
+    {
+        GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->CloseAllEditorsForAsset(AssetObj);
+        // Force GC to detach ticking components before deletion
+        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    }
+
     bool bDeleted = UEditorAssetLibrary::DeleteAsset(AssetPath);
 
     TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
@@ -873,4 +887,66 @@ TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleRunPythonInUnreal(const 
     IFileManager::Get().Delete(*OutputPath);
 
     return ResultObj;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPEditorCommands::HandleSearchOutputLog(const TSharedPtr<FJsonObject>& Params)
+{
+    FString Pattern;
+    if (!Params->TryGetStringField(TEXT("pattern"), Pattern))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'pattern'"));
+
+    int32 MaxResults = 50;
+    Params->TryGetNumberField(TEXT("max_results"), MaxResults);
+    MaxResults = FMath::Clamp(MaxResults, 1, 500);
+
+    bool bCaseSensitive = false;
+    Params->TryGetBoolField(TEXT("case_sensitive"), bCaseSensitive);
+
+    // Find the current log file
+    FString OutputLogPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectLogDir() / FApp::GetProjectName() + TEXT(".log"));
+    if (!FPaths::FileExists(OutputLogPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Log file not found: %s"), *OutputLogPath));
+    }
+
+    GLog->Flush();
+
+    TArray<FString> Lines;
+    FString LogContent;
+    // Use CreateFileReader for shared-read access (editor holds log open for writing)
+    TUniquePtr<FArchive> Reader(IFileManager::Get().CreateFileReader(*OutputLogPath, FILEREAD_AllowWrite));
+    if (Reader)
+    {
+        int64 Size = Reader->TotalSize();
+        TArray<uint8> RawData;
+        RawData.SetNumUninitialized(Size);
+        Reader->Serialize(RawData.GetData(), Size);
+        Reader->Close();
+        FFileHelper::BufferToString(LogContent, RawData.GetData(), RawData.Num());
+        LogContent.ParseIntoArrayLines(Lines, false);
+    }
+
+    TArray<TSharedPtr<FJsonValue>> Matches;
+    // Search from end (most recent first)
+    for (int32 i = Lines.Num() - 1; i >= 0 && Matches.Num() < MaxResults; --i)
+    {
+        bool bMatch = bCaseSensitive
+            ? Lines[i].Contains(Pattern, ESearchCase::CaseSensitive)
+            : Lines[i].Contains(Pattern, ESearchCase::IgnoreCase);
+        if (bMatch)
+        {
+            TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+            Entry->SetNumberField(TEXT("line"), i + 1);
+            Entry->SetStringField(TEXT("text"), Lines[i]);
+            Matches.Insert(MakeShared<FJsonValueObject>(Entry), 0);
+        }
+    }
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("log_path"), OutputLogPath);
+    Result->SetNumberField(TEXT("total_lines"), Lines.Num());
+    Result->SetNumberField(TEXT("match_count"), Matches.Num());
+    Result->SetArrayField(TEXT("matches"), Matches);
+    return Result;
 }

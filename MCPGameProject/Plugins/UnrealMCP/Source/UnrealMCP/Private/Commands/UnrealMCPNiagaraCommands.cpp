@@ -19,6 +19,7 @@
 #include "NiagaraScriptSource.h"
 #include "NiagaraNodeAssignment.h"
 #include "NiagaraNodeInput.h"
+#include "NiagaraScriptVariable.h"
 #include "NiagaraSimulationStageBase.h"
 #include "NiagaraScript.h"
 #include "NiagaraDataInterface.h"
@@ -47,6 +48,7 @@
 #include "NiagaraDataChannelAsset.h"
 #include "NiagaraDataChannel.h"
 #include "NiagaraScratchPadContainer.h"
+#include "Internationalization/Regex.h"
 #pragma warning(pop)
 
 #include "AssetToolsModule.h"
@@ -247,6 +249,8 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCommand(
         return HandleMoveNiagaraRenderer(Params);
     if (CommandType == TEXT("link_niagara_module_input"))
         return HandleLinkNiagaraModuleInput(Params);
+    if (CommandType == TEXT("inspect_niagara_module"))
+        return HandleInspectNiagaraModule(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara command: %s"), *CommandType));
@@ -1484,6 +1488,29 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleAddNiagaraModule(
 
     if (!NewNode)
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to add module to stack"));
+
+    // Diagnostic: log FunctionCall pins after AddScriptModuleToStack
+    UE_LOG(LogTemp, Warning, TEXT("MCP AddModule DIAG: FunctionCall has %d pins, HasValidScriptAndGraph=%d"),
+        NewNode->Pins.Num(), NewNode->HasValidScriptAndGraph() ? 1 : 0);
+    for (UEdGraphPin* Pin : NewNode->Pins)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("  Pin: %s dir=%s type=%s links=%d"),
+            *Pin->PinName.ToString(),
+            Pin->Direction == EGPD_Input ? TEXT("IN") : TEXT("OUT"),
+            *Pin->PinType.PinCategory.ToString(),
+            Pin->LinkedTo.Num());
+    }
+    // Check if the called graph has our input nodes
+    if (NewNode->HasValidScriptAndGraph())
+    {
+        UNiagaraGraph* CalledGraph = NewNode->GetCalledGraph();
+        int32 InputCount = 0;
+        for (UEdGraphNode* GN : CalledGraph->Nodes)
+        {
+            if (Cast<UNiagaraNodeInput>(GN)) InputCount++;
+        }
+        UE_LOG(LogTemp, Warning, TEXT("MCP AddModule DIAG: CalledGraph has %d nodes, %d InputNodes"), CalledGraph->Nodes.Num(), InputCount);
+    }
 
     if (!bBatchMode)
     {
@@ -4093,10 +4120,13 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraHlslModule
                 NameStr = Decl.Mid(SpaceIdx + 1).TrimStartAndEnd();
                 int32 SemiIdx;
                 if (NameStr.FindChar(';', SemiIdx)) NameStr = NameStr.Left(SemiIdx).TrimEnd();
+
+                // Lines with '=' are local variable assignments, NOT input declarations
+                bool bHasInitializer = NameStr.Contains(TEXT("="));
                 int32 EqIdx;
                 if (NameStr.FindChar('=', EqIdx)) NameStr = NameStr.Left(EqIdx).TrimEnd();
 
-                bool bIsVarDecl = !NameStr.Contains(TEXT("(")) && !NameStr.Contains(TEXT(".")) &&
+                bool bIsVarDecl = !bHasInitializer && !NameStr.Contains(TEXT("(")) && !NameStr.Contains(TEXT(".")) &&
                     !NameStr.Contains(TEXT("[")) && !NameStr.Contains(TEXT("+"));
                 bool bIsKnownType = (TypeStr == TEXT("float") || TypeStr == TEXT("float2") ||
                     TypeStr == TEXT("float3") || TypeStr == TEXT("float4") ||
@@ -4114,11 +4144,24 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraHlslModule
             ProcessedHlsl += Line + TEXT("\n");
         }
 
-        // Replace variable references with In_/Out_ prefixed names
+        // Replace variable references with In_/Out_ prefixed names (whole-word only)
         for (const FHlslVar& Var : ParsedVars)
         {
             FString Prefix = Var.bIsOutput ? TEXT("Out_") : TEXT("In_");
-            ProcessedHlsl = ProcessedHlsl.Replace(*Var.Name, *(Prefix + Var.Name));
+            FString Pattern = FString::Printf(TEXT("(?<!\\.)\\b%s\\b"), *Var.Name);
+            FString Replacement = Prefix + Var.Name;
+            FRegexPattern RegexPattern(Pattern);
+            FRegexMatcher Matcher(RegexPattern, ProcessedHlsl);
+            FString Result;
+            int32 LastEnd = 0;
+            while (Matcher.FindNext())
+            {
+                Result += ProcessedHlsl.Mid(LastEnd, Matcher.GetMatchBeginning() - LastEnd);
+                Result += Replacement;
+                LastEnd = Matcher.GetMatchEnding();
+            }
+            Result += ProcessedHlsl.Mid(LastEnd);
+            ProcessedHlsl = Result;
         }
     }
 
@@ -4187,7 +4230,15 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraHlslModule
         else if (Var.Type == TEXT("float2") || Var.Type == TEXT("Vector2f")) TypeDef = FNiagaraTypeDefinition::GetVec2Def();
         else if (Var.Type == TEXT("int") || Var.Type == TEXT("int32")) TypeDef = FNiagaraTypeDefinition::GetIntDef();
         else if (Var.Type == TEXT("bool")) TypeDef = FNiagaraTypeDefinition::GetBoolDef();
+        else if (Var.Type == TEXT("position")) TypeDef = FNiagaraTypeDefinition::GetPositionDef();
         else continue;
+
+        // Auto-promote float3 outputs named *Position* to Position type for compatibility
+        if ((Var.Type == TEXT("float3") || Var.Type == TEXT("Vector3f")) && Var.bIsOutput
+            && Var.Name.Contains(TEXT("Position")))
+        {
+            TypeDef = FNiagaraTypeDefinition::GetPositionDef();
+        }
 
         EEdGraphPinDirection Dir = Var.bIsOutput ? EGPD_Output : EGPD_Input;
         UEdGraphPin* Pin = ConvertAddPin(Dir, TypeDef, FName(*Var.Name));
@@ -4202,9 +4253,106 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleCreateNiagaraHlslModule
         }
     }
 
+    // Create UNiagaraNodeInput nodes for each input variable.
+    // AllocateDefaultPins on FunctionCall reads these to create exposed input pins.
+    for (const FHlslVar& Var : ParsedVars)
+    {
+        if (Var.bIsOutput) continue;
+
+        FNiagaraTypeDefinition TypeDef;
+        if (Var.Type == TEXT("float")) TypeDef = FNiagaraTypeDefinition::GetFloatDef();
+        else if (Var.Type == TEXT("float3") || Var.Type == TEXT("Vector3f")) TypeDef = FNiagaraTypeDefinition::GetVec3Def();
+        else if (Var.Type == TEXT("float4") || Var.Type == TEXT("Vector4f")) TypeDef = FNiagaraTypeDefinition::GetVec4Def();
+        else if (Var.Type == TEXT("float2") || Var.Type == TEXT("Vector2f")) TypeDef = FNiagaraTypeDefinition::GetVec2Def();
+        else if (Var.Type == TEXT("int") || Var.Type == TEXT("int32")) TypeDef = FNiagaraTypeDefinition::GetIntDef();
+        else if (Var.Type == TEXT("bool")) TypeDef = FNiagaraTypeDefinition::GetBoolDef();
+        else if (Var.Type == TEXT("position")) TypeDef = FNiagaraTypeDefinition::GetPositionDef();
+        else continue;
+
+        // Detect known particle attributes → use Attribute usage (auto-reads from particles)
+        static const TSet<FString> ParticleAttribs = {
+            TEXT("Age"), TEXT("NormalizedAge"), TEXT("Position"), TEXT("Velocity"),
+            TEXT("UniqueID"), TEXT("Color"), TEXT("Mass"), TEXT("SpriteSize"),
+            TEXT("RibbonWidth"), TEXT("Scale"), TEXT("ExecutionIndex")
+        };
+        bool bIsAttribute = ParticleAttribs.Contains(Var.Name);
+
+        // Position attribute must use PositionDef not Vec3Def
+        if (Var.Name == TEXT("Position") && TypeDef == FNiagaraTypeDefinition::GetVec3Def())
+            TypeDef = FNiagaraTypeDefinition::GetPositionDef();
+        FName VarFName = bIsAttribute
+            ? FName(*FString::Printf(TEXT("Particles.%s"), *Var.Name))
+            : FName(*Var.Name);
+        FNiagaraVariable NVar(TypeDef, VarFName);
+
+        FGraphNodeCreator<UNiagaraNodeInput> VarInputCreator(*Graph);
+        UNiagaraNodeInput* VarInputNode = VarInputCreator.CreateNode();
+        VarInputNode->Input = NVar;
+        VarInputNode->Usage = bIsAttribute ? ENiagaraInputNodeUsage::Attribute : ENiagaraInputNodeUsage::Parameter;
+        VarInputCreator.Finalize();
+
+        if (bIsAttribute)
+        {
+            UE_LOG(LogTemp, Display, TEXT("MCP HLSL: '%s' → Attribute (Particles.%s)"), *Var.Name, *Var.Name);
+        }
+        else
+        {
+            // Register user-configurable params in graph metadata for StackVM discovery
+            auto& MetaData = Graph->GetAllMetaData();
+            if (!MetaData.Contains(NVar))
+            {
+                UNiagaraScriptVariable* SV = NewObject<UNiagaraScriptVariable>(Graph, FName(), RF_Transactional);
+                SV->Init(NVar, FNiagaraVariableMetaData());
+                SV->DefaultMode = ENiagaraDefaultMode::Value;
+                FNiagaraEditorUtilities::ResetVariableToDefaultValue(SV->Variable);
+                MetaData.Add(NVar, SV);
+                UE_LOG(LogTemp, Display, TEXT("MCP HLSL: '%s' → Parameter (user-configurable)"), *Var.Name);
+            }
+        }
+
+        // Wire this input node's output → CustomHlsl's matching input pin
+        UEdGraphPin* VarOutputPin = VarInputNode->Pins.Num() > 0 ? VarInputNode->Pins[0] : nullptr;
+        for (UEdGraphPin* Pin : CustomNode->Pins)
+        {
+            if (Pin && Pin->Direction == EGPD_Input && Pin->PinName == FName(*Var.Name))
+            {
+                if (VarOutputPin)
+                {
+                    VarOutputPin->MakeLinkTo(Pin);
+                    UE_LOG(LogTemp, Display, TEXT("MCP HLSL: Wired InputNode(%s) → CustomHlsl.%s"), *Var.Name, *Var.Name);
+                }
+                break;
+            }
+        }
+    }
+
     CustomNode->MarkNodeRequiresSynchronization(TEXT("MCP_SetCustomHlsl"), true);
     UE_LOG(LogTemp, Display, TEXT("MCP HLSL: %d data pins, Sig.In=%d Sig.Out=%d, total=%d"),
         PinsCreated, CustomNode->Signature.Inputs.Num(), CustomNode->Signature.Outputs.Num(), CustomNode->Pins.Num());
+
+    // Diagnostic: verify InputNodes are in the graph
+    {
+        int32 InputNodeCount = 0;
+        UE_LOG(LogTemp, Warning, TEXT("MCP HLSL DIAG: Total graph nodes=%d"), Graph->Nodes.Num());
+        for (UEdGraphNode* GN : Graph->Nodes)
+        {
+            UNiagaraNodeInput* AsInput = Cast<UNiagaraNodeInput>(GN);
+            if (AsInput)
+            {
+                InputNodeCount++;
+                UE_LOG(LogTemp, Warning, TEXT("  InputNode: name=%s type=%s usage=%d pins=%d"),
+                    *AsInput->Input.GetName().ToString(),
+                    *AsInput->Input.GetType().GetName(),
+                    (int32)AsInput->Usage,
+                    AsInput->Pins.Num());
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("  Node: %s (%s)"), *GN->GetNodeTitle(ENodeTitleType::FullTitle).ToString(), *GN->GetClass()->GetName());
+            }
+        }
+        UE_LOG(LogTemp, Warning, TEXT("MCP HLSL DIAG: Found %d UNiagaraNodeInput nodes"), InputNodeCount);
+    }
 
     // Wire: InputNode → CustomHLSL.InputMap, CustomHLSL.OutputMap → OutputNode
     UEdGraphPin* InputOut = InputNode->Pins.Num() > 0 ? InputNode->Pins[0] : nullptr;
@@ -5365,5 +5513,97 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleLinkNiagaraModuleInput(
     Result->SetStringField(TEXT("module"), ModuleName);
     Result->SetStringField(TEXT("input"), InputName);
     Result->SetStringField(TEXT("linked_to"), LinkedParam);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleInspectNiagaraModule(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString ModulePath;
+    if (!Params->TryGetStringField(TEXT("module_path"), ModulePath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'module_path'"));
+
+    UNiagaraScript* Script = LoadObject<UNiagaraScript>(nullptr, *ModulePath);
+    if (!Script)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Module not found"));
+
+    UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(Script->GetLatestSource());
+    if (!Source || !Source->NodeGraph)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("No source graph"));
+
+    UNiagaraGraph* Graph = Source->NodeGraph;
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("module"), ModulePath);
+    Result->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
+
+    // Dump all nodes
+    TArray<TSharedPtr<FJsonValue>> NodesArray;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+        NodeObj->SetStringField(TEXT("class"), Node->GetClass()->GetName());
+        NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+
+        // Input node details
+        if (UNiagaraNodeInput* InputNode = Cast<UNiagaraNodeInput>(Node))
+        {
+            NodeObj->SetStringField(TEXT("input_name"), InputNode->Input.GetName().ToString());
+            NodeObj->SetStringField(TEXT("input_type"), InputNode->Input.GetType().GetName());
+            NodeObj->SetNumberField(TEXT("usage"), (int32)InputNode->Usage);
+            NodeObj->SetBoolField(TEXT("is_exposed"), InputNode->IsExposed());
+        }
+
+        // CustomHlsl details
+        if (UNiagaraNodeCustomHlsl* HlslNode = Cast<UNiagaraNodeCustomHlsl>(Node))
+        {
+            FStrProperty* StrProp = CastField<FStrProperty>(HlslNode->GetClass()->FindPropertyByName(TEXT("CustomHlsl")));
+            if (StrProp)
+            {
+                FString HlslCode = StrProp->GetPropertyValue(StrProp->ContainerPtrToValuePtr<void>(HlslNode));
+                NodeObj->SetStringField(TEXT("hlsl"), HlslCode.Left(500));
+            }
+        }
+
+        // Pins
+        TArray<TSharedPtr<FJsonValue>> PinsArray;
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin) continue;
+            TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
+            PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+            PinObj->SetStringField(TEXT("dir"), Pin->Direction == EGPD_Input ? TEXT("IN") : TEXT("OUT"));
+            PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+            PinObj->SetStringField(TEXT("default"), Pin->DefaultValue);
+
+            // Connections
+            TArray<TSharedPtr<FJsonValue>> Links;
+            for (UEdGraphPin* Linked : Pin->LinkedTo)
+            {
+                if (!Linked || !Linked->GetOwningNode()) continue;
+                Links.Add(MakeShared<FJsonValueString>(
+                    FString::Printf(TEXT("%s.%s"), *Linked->GetOwningNode()->GetNodeTitle(ENodeTitleType::FullTitle).ToString(), *Linked->PinName.ToString())));
+            }
+            PinObj->SetArrayField(TEXT("links"), Links);
+            PinsArray.Add(MakeShared<FJsonValueObject>(PinObj));
+        }
+        NodeObj->SetArrayField(TEXT("pins"), PinsArray);
+        NodesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
+    }
+    Result->SetArrayField(TEXT("nodes"), NodesArray);
+
+    // Also dump graph metadata (ScriptVariables)
+    auto& MetaData = Graph->GetAllMetaData();
+    TArray<TSharedPtr<FJsonValue>> MetaArray;
+    for (auto& Pair : MetaData)
+    {
+        TSharedPtr<FJsonObject> MetaObj = MakeShared<FJsonObject>();
+        MetaObj->SetStringField(TEXT("var_name"), Pair.Key.GetName().ToString());
+        MetaObj->SetStringField(TEXT("var_type"), Pair.Key.GetType().GetName());
+        if (Pair.Value)
+            MetaObj->SetStringField(TEXT("default_mode"), StaticEnum<ENiagaraDefaultMode>()->GetNameStringByValue((int64)Pair.Value->DefaultMode));
+        MetaArray.Add(MakeShared<FJsonValueObject>(MetaObj));
+    }
+    Result->SetArrayField(TEXT("metadata"), MetaArray);
+
     return Result;
 }

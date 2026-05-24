@@ -12,7 +12,7 @@ Complete index of all 120+ tools available in the Unreal MCP plugin.
 - [Material & Inspection Tools](inspection_tools.md) - asset introspection, materials, meshes, Nanite, skeleton bones, BT inspection, MetaSound graphs
 - [UMG Widget Tools](umg_tools.md) - widget blueprints, buttons, text blocks, bindings
 - [Project Tools](project_tools.md) - input mappings, project settings
-- [Niagara VFX Tools](niagara_tools.md) - 65 commands for full Niagara control
+- [Niagara VFX Tools](niagara_tools.md) - 71 commands for full Niagara control including Custom HLSL modules
 
 ### Extended (Python bridge via `run_python_in_unreal`)
 - [Animation Tools](animation_tools.md) - animation sequences, montages, skeletons, blend spaces

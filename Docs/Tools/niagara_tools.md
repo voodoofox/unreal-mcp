@@ -1,6 +1,6 @@
 # Niagara VFX Tools
 
-65 commands for comprehensive Niagara particle system control. The deepest Niagara MCP integration available.
+71 commands for comprehensive Niagara particle system control, including Custom HLSL module creation. The deepest Niagara MCP integration available.
 
 ## System Lifecycle
 
@@ -110,7 +110,8 @@
 | `create_niagara_scratch_pad_script` | Create new scratch pad (Module/DynamicInput/Function) |
 | `delete_niagara_scratch_pad_script` | Delete scratch pad script |
 | `set_niagara_scratch_pad_hlsl` | Write HLSL to existing scratch pad |
-| `create_niagara_hlsl_module` | Create standalone module asset with custom HLSL |
+| `create_niagara_hlsl_module` | Create standalone module asset with custom HLSL, auto-attribute detection, word-boundary prefix replacement |
+| `inspect_niagara_module` | Dump full module graph: nodes, pins, connections, HLSL code, metadata |
 
 ## Parameter Collections
 

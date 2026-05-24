@@ -246,7 +246,8 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("duplicate_asset") ||
                      CommandType == TEXT("rename_asset") ||
                      CommandType == TEXT("delete_asset") ||
-                     CommandType == TEXT("run_python_in_unreal"))
+                     CommandType == TEXT("run_python_in_unreal") ||
+                     CommandType == TEXT("search_output_log"))
             {
                 ResultJson = Self->EditorCommands->HandleCommand(CommandType, Params);
             }
@@ -386,7 +387,8 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("create_niagara_scratch_pad_script") ||
                      CommandType == TEXT("delete_niagara_scratch_pad_script") ||
                      CommandType == TEXT("move_niagara_renderer") ||
-                     CommandType == TEXT("link_niagara_module_input"))
+                     CommandType == TEXT("link_niagara_module_input") ||
+                     CommandType == TEXT("inspect_niagara_module"))
             {
                 ResultJson = Self->NiagaraCommands->HandleCommand(CommandType, Params);
             }

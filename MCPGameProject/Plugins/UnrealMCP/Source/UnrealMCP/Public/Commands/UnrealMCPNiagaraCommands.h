@@ -107,6 +107,7 @@ private:
     TSharedPtr<FJsonObject> HandleDeleteNiagaraScratchPadScript(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleMoveNiagaraRenderer(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleLinkNiagaraModuleInput(const TSharedPtr<FJsonObject>& Params);
+    TSharedPtr<FJsonObject> HandleInspectNiagaraModule(const TSharedPtr<FJsonObject>& Params);
 
     bool bBatchMode = false;
 };
