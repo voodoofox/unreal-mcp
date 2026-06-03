@@ -153,26 +153,44 @@ UBlueprint* FUnrealMCPCommonUtils::FindBlueprint(const FString& BlueprintName)
 
 UBlueprint* FUnrealMCPCommonUtils::FindBlueprintByName(const FString& BlueprintName)
 {
-    // First try the standard /Game/Blueprints/ path
-    FString AssetPath = TEXT("/Game/Blueprints/") + BlueprintName;
-    UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *AssetPath);
-    if (BP) return BP;
+    UBlueprint* BP = nullptr;
 
-    // If the name looks like a full path, try loading directly
+    // CRITICAL: a rooted content path (starts with '/') must be loaded DIRECTLY. Never prepend
+    // "/Game/Blueprints/" to it — that produces a "//" in the package name, and
+    // LoadObject -> LoadPackage -> CreatePackage hits a FATAL assert ("name containing double
+    // slashes", UObjectGlobals.cpp) which hard-CRASHES the editor instead of failing gracefully.
+    // Only bare asset names get the /Game/Blueprints/ convenience prefix.
     if (BlueprintName.StartsWith(TEXT("/")))
     {
         BP = LoadObject<UBlueprint>(nullptr, *BlueprintName);
         if (BP) return BP;
     }
+    else
+    {
+        const FString AssetPath = TEXT("/Game/Blueprints/") + BlueprintName;
+        BP = LoadObject<UBlueprint>(nullptr, *AssetPath);
+        if (BP) return BP;
+    }
 
-    // Search AssetRegistry for any Blueprint matching this name anywhere under /Game
+    // Search AssetRegistry for any Blueprint matching this name anywhere under /Game.
+    // Match on the LEAF name so a full path, a "Name.Name" object path, or a "Name_C"
+    // class name all still resolve here.
+    FString LeafName = BlueprintName;
+    {
+        int32 SlashIdx;
+        if (LeafName.FindLastChar(TEXT('/'), SlashIdx)) { LeafName = LeafName.Mid(SlashIdx + 1); }
+        int32 DotIdx;
+        if (LeafName.FindChar(TEXT('.'), DotIdx)) { LeafName = LeafName.Left(DotIdx); }
+        LeafName.RemoveFromEnd(TEXT("_C"));
+    }
+
     IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
     TArray<FAssetData> Assets;
     AssetRegistry.GetAssetsByPath(FName(TEXT("/Game")), Assets, true);
 
     for (const FAssetData& Asset : Assets)
     {
-        if (Asset.AssetName.ToString() == BlueprintName)
+        if (Asset.AssetName.ToString() == LeafName)
         {
             FString AssetClassName = Asset.AssetClassPath.GetAssetName().ToString();
             if (AssetClassName == TEXT("Blueprint") || AssetClassName == TEXT("WidgetBlueprint"))
