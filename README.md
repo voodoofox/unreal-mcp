@@ -14,6 +14,10 @@
 
 Unreal MCP lets AI assistants (Claude Code, Cursor, Windsurf, Claude Desktop) control the Unreal Editor through natural language. 130+ tools across 11 categories, including the deepest Niagara VFX integration (70 commands) of any MCP plugin. Custom HLSL module creation, ViewModel-based parameter control, dynamic inputs, and batch operations.
 
+Small example regarding Niagara implementation, on the left, is my drawing of the effect I wanted. I provided this with general descriptive prompt.
+Second image is the result, and thrid one is my slight tweak. Other then tweaking I did not have any interaction with Niagara whatsover.
+https://www.flatvoxel.com/unlisted/combined-12c1e23c45.mp4
+
 ## What Can It Do?
 
 | Category | Tools | Highlights |
