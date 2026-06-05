@@ -18,6 +18,8 @@ Small example regarding Niagara implementation, on the left, is my drawing of th
 Second image is the result, and thrid one is my slight tweak. Other then tweaking I did not have any interaction with Niagara whatsover.
 https://www.flatvoxel.com/unlisted/combined-12c1e23c45.mp4
 
+![Niagara from a prompt: my drawing (left), the AI-generated result (middle), and my slight tweak (right)](assets/combined.gif)
+
 ## What Can It Do?
 
 | Category | Tools | Highlights |
