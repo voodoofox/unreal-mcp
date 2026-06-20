@@ -331,4 +331,47 @@ def register_umg_tools(mcp: FastMCP):
             logger.error(error_msg)
             return {"success": False, "message": error_msg}
 
+    @async_tool(mcp)
+    def umg_set_root_widget(
+        ctx: Context,
+        blueprint_name: str,
+        widget_name: str
+    ) -> Dict[str, Any]:
+        """
+        Promote an existing widget in the tree to be the Widget Blueprint's Root Widget,
+        then compile. Needed because `RootWidget` is a protected UPROPERTY that cannot be
+        set from Python directly.
+
+        Typical UMG build flow (for an AI agent building a widget from scratch):
+          1. create_umg_widget_blueprint(...) -> creates the asset with a Canvas Panel
+             named "RootCanvas" already set as the root.
+          2. Add children onto "RootCanvas" (add_text_block_to_widget / add_button_to_widget).
+          3. Only call umg_set_root_widget if you built a DIFFERENT panel and want it to be
+             the root instead of the default RootCanvas.
+
+        Args:
+            blueprint_name: Widget Blueprint name (resolved under /Game/Widgets/) or full asset path
+            widget_name: Name of a widget already present in the tree to make the root
+
+        Returns:
+            Dict with success and root_widget
+        """
+        from connection_holder import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+            params = {"blueprint_name": blueprint_name, "widget_name": widget_name}
+            logger.info(f"Setting root widget with params: {params}")
+            response = unreal.send_command("umg_set_root_widget", params)
+            if not response:
+                return {"success": False, "message": "No response from Unreal Engine"}
+            logger.info(f"Set root widget response: {response}")
+            return response
+        except Exception as e:
+            error_msg = f"Error setting root widget: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
     logger.info("UMG tools registered successfully") 

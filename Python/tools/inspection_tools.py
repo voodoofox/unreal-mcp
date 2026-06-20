@@ -760,6 +760,51 @@ def register_inspection_tools(mcp: FastMCP):
             return {"success": False, "message": error_msg}
 
     @async_tool(mcp)
+    def add_custom_node_input(
+        ctx: Context,
+        material_path: str,
+        expression_id: int,
+        input_name: str
+    ) -> Dict[str, Any]:
+        """
+        Append a named input to a Custom HLSL material node (MaterialExpressionCustom),
+        preserving its existing inputs AND their wired connections.
+
+        Use this instead of editing `Custom.Inputs` through set_material_expression_property /
+        ImportText: that path rebuilds the whole input array and drops existing connections.
+        After adding, `input_name` becomes a usable variable inside the node's HLSL `Code`,
+        and you can wire an expression into it with connect_material_expressions (the input
+        name is the destination pin). Rejects duplicate names and non-Custom expressions.
+
+        Args:
+            material_path: Base material path
+            expression_id: Target Custom expression id (from get_material_graph)
+            input_name: Name of the new input (becomes an HLSL variable in Code)
+
+        Returns:
+            Dict with material, expression_id, input_name, input_index, success
+        """
+        from connection_holder import get_unreal_connection
+
+        try:
+            unreal = get_unreal_connection()
+            if not unreal:
+                return {"success": False, "message": "Failed to connect to Unreal Engine"}
+            response = unreal.send_command("add_custom_node_input", {
+                "material_path": material_path,
+                "expression_id": expression_id,
+                "input_name": input_name
+            })
+            if not response:
+                return {"success": False, "message": "No response from Unreal Engine"}
+            logger.info(f"Add custom node input response: {response}")
+            return response
+        except Exception as e:
+            error_msg = f"Error adding custom node input: {e}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
+
+    @async_tool(mcp)
     def compile_material(
         ctx: Context,
         material_path: str

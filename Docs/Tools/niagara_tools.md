@@ -2,6 +2,8 @@
 
 73 commands for comprehensive Niagara particle system control, including Custom HLSL module creation. The deepest Niagara MCP integration available.
 
+> **Invoking from an MCP client:** these are individual C++ command handlers, not 1:1 MCP tools. Read with `get_niagara_deep_inspect`, build/modify a system with `import_niagara_system_spec` (spec applied as a batch), or send any command name + params as JSON over TCP to `127.0.0.1:55557` (newline-delimited). See [the invocation model](README.md#invocation-model-for-ai-agents).
+
 ## System Lifecycle
 
 | Tool | Description |
