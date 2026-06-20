@@ -79,4 +79,15 @@ private:
      * @return JSON response with the binding details
      */
     TSharedPtr<FJsonObject> HandleSetTextBlockBinding(const TSharedPtr<FJsonObject>& Params);
-}; 
+
+    /**
+     * Set an existing widget (by name, found in the WidgetTree) as the tree's RootWidget.
+     * Lets Python-driven builders promote a constructed widget to root (RootWidget is a
+     * protected UPROPERTY and cannot be set from Python).
+     * @param Params - Must include:
+     *                "blueprint_name" - Name (under /Game/Widgets/) or full asset path
+     *                "widget_name"    - Name of the widget already present in the tree
+     * @return JSON response with success + root widget name
+     */
+    TSharedPtr<FJsonObject> HandleSetRootWidget(const TSharedPtr<FJsonObject>& Params);
+};

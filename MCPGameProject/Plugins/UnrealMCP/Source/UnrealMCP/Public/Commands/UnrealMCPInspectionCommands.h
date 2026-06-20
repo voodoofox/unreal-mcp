@@ -33,6 +33,9 @@ private:
     TSharedPtr<FJsonObject> HandleConnectMaterialProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleDisconnectMaterialProperty(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleSetMaterialExpressionProperty(const TSharedPtr<FJsonObject>& Params);
+    // Append a named input to a Custom HLSL node, preserving existing inputs + connections (Python /
+    // ImportText can't). Params: material_path, expression_id, input_name. Returns new input index.
+    TSharedPtr<FJsonObject> HandleAddCustomNodeInput(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleCompileMaterial(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetSkeletonBones(const TSharedPtr<FJsonObject>& Params);
     TSharedPtr<FJsonObject> HandleGetBehaviorTreeInfo(const TSharedPtr<FJsonObject>& Params);

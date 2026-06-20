@@ -133,6 +133,10 @@ TSharedPtr<FJsonObject> FUnrealMCPInspectionCommands::HandleCommand(const FStrin
     {
         return HandleSetMaterialExpressionProperty(Params);
     }
+    else if (CommandType == TEXT("add_custom_node_input"))
+    {
+        return HandleAddCustomNodeInput(Params);
+    }
     else if (CommandType == TEXT("compile_material"))
     {
         return HandleCompileMaterial(Params);
@@ -1803,6 +1807,64 @@ TSharedPtr<FJsonObject> FUnrealMCPInspectionCommands::HandleSetMaterialExpressio
     Result->SetNumberField(TEXT("expression_id"), ExpressionId);
     Result->SetStringField(TEXT("property"), PropertyName);
     Result->SetStringField(TEXT("value"), PropertyValue);
+    Result->SetBoolField(TEXT("success"), true);
+    return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPInspectionCommands::HandleAddCustomNodeInput(const TSharedPtr<FJsonObject>& Params)
+{
+    FString MaterialPath, InputName;
+    if (!Params->TryGetStringField(TEXT("material_path"), MaterialPath))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'material_path' parameter"));
+    }
+    int32 ExpressionId = -1;
+    if (!Params->TryGetNumberField(TEXT("expression_id"), ExpressionId))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'expression_id' parameter"));
+    }
+    if (!Params->TryGetStringField(TEXT("input_name"), InputName))
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'input_name' parameter"));
+    }
+
+    UMaterial* Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
+    if (!Material)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Material not found: %s"), *MaterialPath));
+    }
+
+    UMaterialExpression* Expr = FindMaterialExpressionByIndex(Material, ExpressionId);
+    UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expr);
+    if (!Custom)
+    {
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Expression id %d is not a Custom node"), ExpressionId));
+    }
+
+    // Don't duplicate an existing input name.
+    for (const FCustomInput& In : Custom->Inputs)
+    {
+        if (In.InputName == FName(*InputName))
+        {
+            return FUnrealMCPCommonUtils::CreateErrorResponse(
+                FString::Printf(TEXT("Input '%s' already exists on the Custom node"), *InputName));
+        }
+    }
+
+    // Append preserves existing inputs and their connections (the FExpressionInput in each entry).
+    Custom->Modify();
+    FCustomInput NewInput;
+    NewInput.InputName = FName(*InputName);
+    Custom->Inputs.Add(NewInput);
+    Custom->PostEditChange();
+    Material->MarkPackageDirty();
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("material"), Material->GetPathName());
+    Result->SetNumberField(TEXT("expression_id"), ExpressionId);
+    Result->SetStringField(TEXT("input_name"), InputName);
+    Result->SetNumberField(TEXT("input_index"), Custom->Inputs.Num() - 1);
     Result->SetBoolField(TEXT("success"), true);
     return Result;
 }

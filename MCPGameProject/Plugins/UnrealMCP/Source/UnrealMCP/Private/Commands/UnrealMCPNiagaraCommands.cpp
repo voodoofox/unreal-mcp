@@ -1584,24 +1584,15 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleRemoveNiagaraModule(
 
     System->Modify();
 
-    // Break all pin connections and remove the node from the graph
-    UEdGraph* OwningGraph = FoundNode->GetGraph();
-    if (!OwningGraph)
-        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Could not find graph for module node"));
-
-    FoundNode->BreakAllNodeLinks();
-    OwningGraph->RemoveNode(FoundNode);
-
-    if (!bBatchMode)
-    {
-        System->RequestCompile(false);
-        System->MarkPackageDirty();
-    }
-
-    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-    Result->SetBoolField(TEXT("success"), true);
-    Result->SetStringField(TEXT("removed_module"), ModuleName);
-    return Result;
+    // NOTE: the data-layer removal here is unreliable — true removal needs the (non-exported)
+    // RemoveModuleFromStack, a manual node delete corrupts the parameter-map chain, and the exported
+    // FNiagaraStackGraphUtilities::SetModuleIsEnabled crashes outside a stack/ViewModel context. The reliable
+    // path is the ViewModel/stack commands instead. Redirect the caller there.
+    (void)FoundNode;
+    return FUnrealMCPCommonUtils::CreateErrorResponse(
+        TEXT("remove_niagara_module is unreliable on the data layer. Use 'niagara_vm_delete_module' "
+             "(or 'niagara_vm_set_module_enabled' with enabled=false) — the ViewModel/stack path that "
+             "properly reconnects the chain and persists."));
 }
 
 // ─── set_niagara_module_enabled ───────────────────────────────────────────────
@@ -2783,6 +2774,80 @@ static UNiagaraDataInterface* FindDIByName(FVersionedNiagaraEmitterData* Emitter
     return nullptr;
 }
 
+// Find the SOURCE data interface — the object the editor's Details panel binds to and that SaveAsset
+// serializes — rather than the compiled copy returned by FindDIByName. Source DIs live in UNiagaraNodeInput
+// nodes in each script's source graph (this includes directly-set module-input DIs AND dynamic-input DIs
+// like a "Static Mesh Reader", whose overrides are input nodes in the same emitter graph). Modifying this
+// object + recompiling regenerates the compiled copy FROM it, so the change persists and shows in the editor.
+//
+// Name matching is fuzzy because the compiled name carries the emitter prefix (e.g.
+// "Fountain.StaticMeshLocation.Static Mesh") while the source node name is the module.input portion
+// (e.g. "StaticMeshLocation.Static Mesh"). On no match, OutAvailable lists every source DI name found so the
+// caller can report them. OutGraph receives the owning graph (for NotifyGraphChanged).
+static UNiagaraDataInterface* FindSourceDIByName(
+    FVersionedNiagaraEmitterData* EmitterData, const FString& DIName,
+    UNiagaraGraph** OutGraph = nullptr, TArray<FString>* OutAvailable = nullptr)
+{
+    if (!EmitterData) return nullptr;
+
+    // UNiagaraNodeInput::DataInterface is a private UPROPERTY whose accessor (GetDataInterface) isn't
+    // DLL-exported from NiagaraEditor in this engine build → read it via reflection (which ignores C++
+    // access specifiers and needs no exported symbol).
+    FObjectProperty* DIProp = FindFProperty<FObjectProperty>(UNiagaraNodeInput::StaticClass(), TEXT("DataInterface"));
+
+    auto Norm = [](const FString& S) { return S.Replace(TEXT(" "), TEXT("")).ToLower(); };
+    const FString Want = Norm(DIName);
+
+    UNiagaraDataInterface* Exact = nullptr; UNiagaraGraph* ExactGraph = nullptr;
+    UNiagaraDataInterface* Fuzzy = nullptr; UNiagaraGraph* FuzzyGraph = nullptr;
+
+    TArray<UNiagaraScript*> Scripts;
+    EmitterData->GetScripts(Scripts, false, false);
+    for (UNiagaraScript* Script : Scripts)
+    {
+        if (!Script) continue;
+        UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(Script->GetLatestSource());
+        if (!Source || !Source->NodeGraph) continue;
+
+        TArray<UNiagaraNodeInput*> InputNodes;
+        Source->NodeGraph->GetNodesOfClass<UNiagaraNodeInput>(InputNodes);
+        for (UNiagaraNodeInput* Node : InputNodes)
+        {
+            if (!Node || !DIProp) continue;
+            UNiagaraDataInterface* NodeDI = Cast<UNiagaraDataInterface>(DIProp->GetObjectPropertyValue_InContainer(Node));
+            if (!NodeDI) continue;
+            const FString NodeName = Node->Input.GetName().ToString();
+            if (OutAvailable) OutAvailable->AddUnique(NodeName);
+
+            const FString NodeNorm = Norm(NodeName);
+            if (NodeNorm == Want)
+            {
+                if (!Exact) { Exact = NodeDI; ExactGraph = Source->NodeGraph; }
+            }
+            else if (!Fuzzy && (NodeNorm.Contains(Want) || Want.Contains(NodeNorm)))
+            {
+                Fuzzy = NodeDI; FuzzyGraph = Source->NodeGraph;
+            }
+        }
+    }
+
+    if (OutGraph) *OutGraph = Exact ? ExactGraph : FuzzyGraph;
+    return Exact ? Exact : Fuzzy;
+}
+
+// Push a modified source DI back through compilation so the runtime/cached copy regenerates from it, then save.
+static void CommitSourceDIChange(UNiagaraSystem* System, UNiagaraDataInterface* DI, UNiagaraGraph* SourceGraph)
+{
+    if (DI) DI->PostEditChange();          // let the DI rebuild internal state (e.g. resolve a newly-set mesh)
+    if (SourceGraph) SourceGraph->NotifyGraphChanged();
+    if (System)
+    {
+        System->RequestCompile(false);     // regenerate compiled DIs FROM the source we just edited
+        System->MarkPackageDirty();
+        UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+    }
+}
+
 // --- get_niagara_curve_data ---
 
 TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraCurveData(
@@ -2808,7 +2873,9 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraCurveData(
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
 
     FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
-    UNiagaraDataInterface* DI = FindDIByName(EmitterData, DIName);
+    // Source DI first (what set_niagara_curve_data edits), compiled fallback for compatibility.
+    UNiagaraDataInterface* DI = FindSourceDIByName(EmitterData, DIName);
+    if (!DI) DI = FindDIByName(EmitterData, DIName);
     if (!DI)
         return FUnrealMCPCommonUtils::CreateErrorResponse(
             FString::Printf(TEXT("Data interface '%s' not found on emitter %d"), *DIName, EmitterIndex));
@@ -2896,10 +2963,14 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraCurveData(
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
 
     FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
-    UNiagaraDataInterface* DI = FindDIByName(EmitterData, DIName);
+    // Edit the SOURCE curve DI so the change survives recompile + shows in the editor.
+    UNiagaraGraph* SourceGraph = nullptr;
+    TArray<FString> Available;
+    UNiagaraDataInterface* DI = FindSourceDIByName(EmitterData, DIName, &SourceGraph, &Available);
     if (!DI)
         return FUnrealMCPCommonUtils::CreateErrorResponse(
-            FString::Printf(TEXT("Data interface '%s' not found"), *DIName));
+            FString::Printf(TEXT("Source data interface '%s' not found. Available: %s"),
+                *DIName, *FString::Join(Available, TEXT(", "))));
 
     DI->Modify();
     int32 KeysSet = 0;
@@ -2939,8 +3010,7 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraCurveData(
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Not a supported curve-type DI"));
     }
 
-    System->RequestCompile(false);
-    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+    CommitSourceDIChange(System, DI, SourceGraph);
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("status"), TEXT("success"));
@@ -2974,15 +3044,22 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleGetNiagaraDIProperties(
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
 
     FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
-    UNiagaraDataInterface* DI = FindDIByName(EmitterData, DIName);
+    // Prefer the SOURCE DI (matches what set_niagara_di_property edits + what the editor shows); fall back to
+    // the compiled copy so existing callers/names keep working.
+    TArray<FString> Available;
+    bool bSource = true;
+    UNiagaraDataInterface* DI = FindSourceDIByName(EmitterData, DIName, nullptr, &Available);
+    if (!DI) { DI = FindDIByName(EmitterData, DIName); bSource = false; }
     if (!DI)
         return FUnrealMCPCommonUtils::CreateErrorResponse(
-            FString::Printf(TEXT("Data interface '%s' not found"), *DIName));
+            FString::Printf(TEXT("Data interface '%s' not found. Available source DIs: %s"),
+                *DIName, *FString::Join(Available, TEXT(", "))));
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("status"), TEXT("success"));
     Result->SetStringField(TEXT("di_name"), DIName);
     Result->SetStringField(TEXT("di_class"), DI->GetClass()->GetName());
+    Result->SetStringField(TEXT("layer"), bSource ? TEXT("source") : TEXT("compiled"));
 
     TArray<TSharedPtr<FJsonValue>> PropsArray;
     for (TFieldIterator<FProperty> PropIt(DI->GetClass()); PropIt; ++PropIt)
@@ -3040,10 +3117,15 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraDIProperty(
         return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Invalid emitter_index"));
 
     FVersionedNiagaraEmitterData* EmitterData = Handles[EmitterIndex].GetInstance().GetEmitterData();
-    UNiagaraDataInterface* DI = FindDIByName(EmitterData, DIName);
+    // Edit the SOURCE DI (what the editor binds to + SaveAsset serializes), NOT the compiled copy from
+    // FindDIByName — a recompile would otherwise regenerate the compiled copy from the source and wipe the edit.
+    UNiagaraGraph* SourceGraph = nullptr;
+    TArray<FString> Available;
+    UNiagaraDataInterface* DI = FindSourceDIByName(EmitterData, DIName, &SourceGraph, &Available);
     if (!DI)
         return FUnrealMCPCommonUtils::CreateErrorResponse(
-            FString::Printf(TEXT("Data interface '%s' not found"), *DIName));
+            FString::Printf(TEXT("Source data interface '%s' not found. Available: %s"),
+                *DIName, *FString::Join(Available, TEXT(", "))));
 
     FProperty* Prop = DI->GetClass()->FindPropertyByName(*PropertyName);
     if (!Prop)
@@ -3053,7 +3135,7 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraDIProperty(
     DI->Modify();
     void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(DI);
 
-    // Handle object references (material paths etc.)
+    // Handle object references (mesh/material paths etc.)
     FString InputText = PropertyValue;
     if (FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
     {
@@ -3070,14 +3152,18 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraCommands::HandleSetNiagaraDIProperty(
         return FUnrealMCPCommonUtils::CreateErrorResponse(
             FString::Printf(TEXT("Failed to set '%s' to '%s'"), *PropertyName, *PropertyValue));
 
-    System->RequestCompile(false);
-    UEditorAssetLibrary::SaveAsset(System->GetPathName(), false);
+    CommitSourceDIChange(System, DI, SourceGraph);
+
+    // Read the value back from the (now-recompiled) source so the caller can trust it stuck.
+    FString After;
+    Prop->ExportTextItem_Direct(After, ValuePtr, nullptr, DI, PPF_None);
 
     TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
     Result->SetStringField(TEXT("status"), TEXT("success"));
     Result->SetStringField(TEXT("di_name"), DIName);
     Result->SetStringField(TEXT("property"), PropertyName);
     Result->SetStringField(TEXT("value"), PropertyValue);
+    Result->SetStringField(TEXT("value_after"), After);
     return Result;
 }
 

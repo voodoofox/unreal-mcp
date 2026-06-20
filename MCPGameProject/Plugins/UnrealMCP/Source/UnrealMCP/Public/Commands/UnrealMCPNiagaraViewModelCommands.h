@@ -7,6 +7,7 @@ class UNiagaraSystem;
 class FNiagaraSystemViewModel;
 class UNiagaraStackFunctionInput;
 class UNiagaraStackEntry;
+class UNiagaraStackModuleItem;
 
 /**
  * ViewModel-based Niagara commands.
@@ -29,10 +30,18 @@ private:
     // Set a dynamic input expression on a module input
     TSharedPtr<FJsonObject> HandleNiagaraVMSetDynamicInput(const TSharedPtr<FJsonObject>& Params);
 
+    // Enable/disable a module through the stack (proper: reconnects param-map chain + persists)
+    TSharedPtr<FJsonObject> HandleNiagaraVMSetModuleEnabled(const TSharedPtr<FJsonObject>& Params);
+
+    // Delete a module through the stack (the editor's own removal)
+    TSharedPtr<FJsonObject> HandleNiagaraVMDeleteModule(const TSharedPtr<FJsonObject>& Params);
+
     // Helpers
     TSharedPtr<FNiagaraSystemViewModel> GetOrCreateViewModel(UNiagaraSystem* System);
     UNiagaraStackFunctionInput* FindInput(TSharedPtr<FNiagaraSystemViewModel> VM, int32 EmitterIndex,
         const FString& ScriptType, const FString& ModuleName, const FString& InputName);
+    UNiagaraStackModuleItem* FindModule(TSharedPtr<FNiagaraSystemViewModel> VM, int32 EmitterIndex,
+        const FString& ModuleName);
     void CollectInputs(UNiagaraStackEntry* Entry, TArray<UNiagaraStackFunctionInput*>& OutInputs);
 
     // Cache ViewModels to avoid re-creating them

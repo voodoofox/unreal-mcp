@@ -291,6 +291,7 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("add_button_to_widget") ||
                      CommandType == TEXT("bind_widget_event") ||
                      CommandType == TEXT("set_text_block_binding") ||
+                     CommandType == TEXT("umg_set_root_widget") ||
                      CommandType == TEXT("add_widget_to_viewport"))
             {
                 ResultJson = Self->UMGCommands->HandleCommand(CommandType, Params);
@@ -314,6 +315,7 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("connect_material_property") ||
                      CommandType == TEXT("disconnect_material_property") ||
                      CommandType == TEXT("set_material_expression_property") ||
+                     CommandType == TEXT("add_custom_node_input") ||
                      CommandType == TEXT("compile_material") ||
                      CommandType == TEXT("get_skeleton_bones") ||
                      CommandType == TEXT("get_behavior_tree_info") ||
@@ -394,7 +396,9 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             }
             else if (CommandType == TEXT("niagara_vm_set_input") ||
                      CommandType == TEXT("niagara_vm_get_inputs") ||
-                     CommandType == TEXT("niagara_vm_set_dynamic_input"))
+                     CommandType == TEXT("niagara_vm_set_dynamic_input") ||
+                     CommandType == TEXT("niagara_vm_set_module_enabled") ||
+                     CommandType == TEXT("niagara_vm_delete_module"))
             {
                 ResultJson = Self->NiagaraVMCommands->HandleCommand(CommandType, Params);
             }

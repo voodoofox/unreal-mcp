@@ -1,6 +1,6 @@
 # Niagara VFX Tools
 
-71 commands for comprehensive Niagara particle system control, including Custom HLSL module creation. The deepest Niagara MCP integration available.
+73 commands for comprehensive Niagara particle system control, including Custom HLSL module creation. The deepest Niagara MCP integration available.
 
 ## System Lifecycle
 
@@ -48,7 +48,7 @@
 |------|-------------|
 | `list_niagara_modules` | List modules on an emitter |
 | `add_niagara_module` | Add module by script path |
-| `remove_niagara_module` | Remove module |
+| `remove_niagara_module` | Deprecated — use `niagara_vm_delete_module` (the data-layer removal was unreliable) |
 | `set_niagara_module_enabled` | Enable/disable module |
 | `get_niagara_module_inputs` | Read rapid iteration parameters |
 | `set_niagara_module_input` | Set rapid iteration parameter value |
@@ -65,6 +65,8 @@
 | `niagara_vm_get_inputs` | List ALL inputs including static switches with values |
 | `niagara_vm_set_input` | Set any input value (same code path as editor UI) |
 | `niagara_vm_set_dynamic_input` | Set dynamic input expressions (Random Range, etc.) |
+| `niagara_vm_set_module_enabled` | Enable/disable a module via the stack/ViewModel (reconnects the param-map chain + persists) |
+| `niagara_vm_delete_module` | Delete a module via the stack/ViewModel (the editor's own removal path) |
 
 ## User Parameters
 

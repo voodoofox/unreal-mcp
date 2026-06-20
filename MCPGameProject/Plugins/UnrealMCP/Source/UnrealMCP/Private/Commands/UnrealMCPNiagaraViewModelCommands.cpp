@@ -13,6 +13,7 @@
 #include "ViewModels/Stack/NiagaraStackViewModel.h"
 #include "ViewModels/Stack/NiagaraStackEntry.h"
 #include "ViewModels/Stack/NiagaraStackModuleItem.h"
+#include "ViewModels/Stack/NiagaraStackItem.h"
 #include "ViewModels/Stack/NiagaraStackFunctionInput.h"
 #include "ViewModels/Stack/NiagaraStackRoot.h"
 
@@ -213,6 +214,154 @@ UNiagaraStackFunctionInput* FUnrealMCPNiagaraViewModelCommands::FindInput(
     return nullptr;
 }
 
+// ─── FindModule: locate a stack module item by name ───────────────────────────
+
+UNiagaraStackModuleItem* FUnrealMCPNiagaraViewModelCommands::FindModule(
+    TSharedPtr<FNiagaraSystemViewModel> VM, int32 EmitterIndex, const FString& ModuleName)
+{
+    if (!VM) return nullptr;
+
+    const auto& EmitterVMs = VM->GetEmitterHandleViewModels();
+    if (!EmitterVMs.IsValidIndex(EmitterIndex)) return nullptr;
+
+    UNiagaraStackViewModel* StackVM = EmitterVMs[EmitterIndex]->GetEmitterStackViewModel();
+    if (!StackVM) return nullptr;
+
+    UNiagaraStackEntry* Root = StackVM->GetRootEntry();
+    if (!Root) return nullptr;
+
+    const FString NormalizedSearch = NormalizeModuleName(ModuleName);
+    UNiagaraStackModuleItem* Exact = nullptr;
+    UNiagaraStackModuleItem* Fuzzy = nullptr;
+
+    TQueue<UNiagaraStackEntry*> Queue;
+    Queue.Enqueue(Root);
+    while (!Queue.IsEmpty())
+    {
+        UNiagaraStackEntry* Entry = nullptr;
+        Queue.Dequeue(Entry);
+        if (!Entry) continue;
+
+        if (UNiagaraStackModuleItem* Module = Cast<UNiagaraStackModuleItem>(Entry))
+        {
+            const FString NormalizedDisplay = NormalizeModuleName(Module->GetDisplayName().ToString());
+            if (NormalizedDisplay == NormalizedSearch) { Exact = Module; break; }
+            if (!Fuzzy && NormalizedDisplay.Find(NormalizedSearch) != INDEX_NONE) Fuzzy = Module;
+        }
+
+        TArray<UNiagaraStackEntry*> Children;
+        Entry->GetUnfilteredChildren(Children);
+        for (UNiagaraStackEntry* Child : Children) Queue.Enqueue(Child);
+    }
+
+    return Exact ? Exact : Fuzzy;
+}
+
+// ─── niagara_vm_set_module_enabled ─────────────────────────────────────────────
+// Enable/disable a module through the stack (UNiagaraStackItem::SetIsEnabled) — the editor's own path,
+// which keeps the parameter-map chain valid and persists. Replaces the data-layer command that crashed.
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMSetModuleEnabled(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString ModuleName;
+    if (!Params->TryGetStringField(TEXT("module_name"), ModuleName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'module_name'"));
+
+    bool bEnabled = true;
+    Params->TryGetBoolField(TEXT("enabled"), bEnabled);
+
+    UNiagaraSystem* System = LoadNiagaraSystemVM(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    TSharedPtr<FNiagaraSystemViewModel> VM = GetOrCreateViewModel(System);
+    if (!VM)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create ViewModel"));
+
+    UNiagaraStackModuleItem* Module = FindModule(VM, EmitterIndex, ModuleName);
+    if (!Module)
+    {
+        SafeReleaseViewModel(VM);
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Module '%s' not found"), *ModuleName));
+    }
+
+    const FString DisplayName = Module->GetDisplayName().ToString();
+    Module->SetIsEnabled(bEnabled);
+    const bool bEnabledAfter = Module->GetIsEnabled();
+
+    System->MarkPackageDirty();
+    UEditorAssetLibrary::SaveAsset(System->GetPathName());
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetBoolField(TEXT("success"), true);
+    Result->SetStringField(TEXT("module"), DisplayName);
+    Result->SetBoolField(TEXT("enabled"), bEnabledAfter);
+    SafeReleaseViewModel(VM);
+    return Result;
+}
+
+// ─── niagara_vm_delete_module ──────────────────────────────────────────────────
+// Delete a module through the stack (UNiagaraStackModuleItem::Delete) — reconnects the chain + persists.
+
+TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleNiagaraVMDeleteModule(
+    const TSharedPtr<FJsonObject>& Params)
+{
+    FString SystemPath;
+    if (!Params->TryGetStringField(TEXT("system_path"), SystemPath))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'system_path'"));
+
+    int32 EmitterIndex = 0;
+    Params->TryGetNumberField(TEXT("emitter_index"), EmitterIndex);
+
+    FString ModuleName;
+    if (!Params->TryGetStringField(TEXT("module_name"), ModuleName))
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'module_name'"));
+
+    UNiagaraSystem* System = LoadNiagaraSystemVM(SystemPath);
+    if (!System)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("System not found"));
+
+    TSharedPtr<FNiagaraSystemViewModel> VM = GetOrCreateViewModel(System);
+    if (!VM)
+        return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create ViewModel"));
+
+    UNiagaraStackModuleItem* Module = FindModule(VM, EmitterIndex, ModuleName);
+    if (!Module)
+    {
+        SafeReleaseViewModel(VM);
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Module '%s' not found"), *ModuleName));
+    }
+
+    const FString DisplayName = Module->GetDisplayName().ToString();
+    if (!Module->CanMoveAndDelete())
+    {
+        SafeReleaseViewModel(VM);
+        return FUnrealMCPCommonUtils::CreateErrorResponse(
+            FString::Printf(TEXT("Module '%s' cannot be deleted"), *DisplayName));
+    }
+
+    Module->Delete();  // Module pointer is invalid after this — DisplayName captured above
+
+    System->MarkPackageDirty();
+    UEditorAssetLibrary::SaveAsset(System->GetPathName());
+
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetBoolField(TEXT("success"), true);
+    Result->SetStringField(TEXT("deleted_module"), DisplayName);
+    SafeReleaseViewModel(VM);
+    return Result;
+}
+
 // ─── Command Router ───────────────────────────────────────────────────────────
 
 TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleCommand(
@@ -224,6 +373,10 @@ TSharedPtr<FJsonObject> FUnrealMCPNiagaraViewModelCommands::HandleCommand(
         return HandleNiagaraVMGetInputs(Params);
     if (CommandType == TEXT("niagara_vm_set_dynamic_input"))
         return HandleNiagaraVMSetDynamicInput(Params);
+    if (CommandType == TEXT("niagara_vm_set_module_enabled"))
+        return HandleNiagaraVMSetModuleEnabled(Params);
+    if (CommandType == TEXT("niagara_vm_delete_module"))
+        return HandleNiagaraVMDeleteModule(Params);
 
     return FUnrealMCPCommonUtils::CreateErrorResponse(
         FString::Printf(TEXT("Unknown Niagara VM command: %s"), *CommandType));

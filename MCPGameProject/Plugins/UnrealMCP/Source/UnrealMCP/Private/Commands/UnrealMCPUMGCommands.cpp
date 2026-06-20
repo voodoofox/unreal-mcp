@@ -6,6 +6,7 @@
 #include "Blueprint/UserWidget.h"
 #include "Components/TextBlock.h"
 #include "WidgetBlueprint.h"
+#include "Blueprint/WidgetBlueprintGeneratedClass.h"
 // We'll create widgets using regular Factory classes
 #include "Factories/Factory.h"
 // Remove problematic includes that don't exist in UE 5.5
@@ -56,6 +57,10 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCommand(const FString& Comm
 	{
 		return HandleSetTextBlockBinding(Params);
 	}
+	else if (CommandName == TEXT("umg_set_root_widget"))
+	{
+		return HandleSetRootWidget(Params);
+	}
 
 	return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Unknown UMG command: %s"), *CommandName));
 }
@@ -69,15 +74,43 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCreateUMGWidgetBlueprint(co
 		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'name' parameter"));
 	}
 
-	// Create the full asset path
+	// Optional package path (default /Game/Widgets/). Normalize to a trailing slash.
 	FString PackagePath = TEXT("/Game/Widgets/");
+	Params->TryGetStringField(TEXT("path"), PackagePath);
+	if (!PackagePath.EndsWith(TEXT("/")))
+	{
+		PackagePath += TEXT("/");
+	}
+
+	// Optional parent class (default UUserWidget). Accept a bare native name ("PauseMenuWidget"),
+	// a "U"-prefixed name, or a full object path. Must resolve to a UserWidget subclass.
+	UClass* ParentClass = UUserWidget::StaticClass();
+	FString ParentClassName;
+	if (Params->TryGetStringField(TEXT("parent_class"), ParentClassName) && !ParentClassName.IsEmpty())
+	{
+		FString Cleaned = ParentClassName;
+		Cleaned.RemoveFromStart(TEXT("U"));
+		UClass* Found = UClass::TryFindTypeSlow<UClass>(ParentClassName);
+		if (!Found) Found = UClass::TryFindTypeSlow<UClass>(Cleaned);
+		if (!Found) Found = LoadObject<UClass>(nullptr, *ParentClassName);
+		if (Found && Found->IsChildOf(UUserWidget::StaticClass()))
+		{
+			ParentClass = Found;
+		}
+		else
+		{
+			return FUnrealMCPCommonUtils::CreateErrorResponse(
+				FString::Printf(TEXT("parent_class '%s' not found or not a UserWidget subclass"), *ParentClassName));
+		}
+	}
+
 	FString AssetName = BlueprintName;
 	FString FullPath = PackagePath + AssetName;
 
 	// Check if asset already exists
 	if (UEditorAssetLibrary::DoesAssetExist(FullPath))
 	{
-		return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget Blueprint '%s' already exists"), *BlueprintName));
+		return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget Blueprint '%s' already exists"), *FullPath));
 	}
 
 	// Create package
@@ -87,28 +120,30 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCreateUMGWidgetBlueprint(co
 		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create package"));
 	}
 
-	// Create Widget Blueprint using KismetEditorUtilities
-	UBlueprint* NewBlueprint = FKismetEditorUtilities::CreateBlueprint(
-		UUserWidget::StaticClass(),  // Parent class
-		Package,                     // Outer package
-		FName(*AssetName),           // Blueprint name
-		BPTYPE_Normal,               // Blueprint type
-		UBlueprint::StaticClass(),   // Blueprint class
-		UBlueprintGeneratedClass::StaticClass(), // Generated class
-		FName("CreateUMGWidget")     // Creation method name
-	);
+	// Create a *real* Widget Blueprint. The prior code passed UBlueprint::StaticClass() /
+	// UBlueprintGeneratedClass::StaticClass(), which produced a plain Blueprint and failed the
+	// cast to UWidgetBlueprint on UE 5.7. The widget-specific classes are required.
+	UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(
+		FKismetEditorUtilities::CreateBlueprint(
+			ParentClass,                                    // Parent class (UserWidget subclass)
+			Package,                                        // Outer package
+			FName(*AssetName),                              // Blueprint name
+			BPTYPE_Normal,                                  // Blueprint type
+			UWidgetBlueprint::StaticClass(),                // Blueprint class
+			UWidgetBlueprintGeneratedClass::StaticClass(),  // Generated class
+			FName("CreateUMGWidget")));                     // Creation method name
 
-	// Make sure the Blueprint was created successfully
-	UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(NewBlueprint);
 	if (!WidgetBlueprint)
 	{
 		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Failed to create Widget Blueprint"));
 	}
 
-	// Add a default Canvas Panel if one doesn't exist
+	// Add a default Canvas Panel with a predictable name ("RootCanvas") so Python-driven builders
+	// can grab it (WidgetTree.FindWidget) and add children — RootWidget itself isn't Python-settable.
 	if (!WidgetBlueprint->WidgetTree->RootWidget)
 	{
-		UCanvasPanel* RootCanvas = WidgetBlueprint->WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass());
+		UCanvasPanel* RootCanvas = WidgetBlueprint->WidgetTree->ConstructWidget<UCanvasPanel>(
+			UCanvasPanel::StaticClass(), TEXT("RootCanvas"));
 		WidgetBlueprint->WidgetTree->RootWidget = RootCanvas;
 	}
 
@@ -123,6 +158,8 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleCreateUMGWidgetBlueprint(co
 	TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
 	ResultObj->SetStringField(TEXT("name"), BlueprintName);
 	ResultObj->SetStringField(TEXT("path"), FullPath);
+	ResultObj->SetStringField(TEXT("parent_class"), ParentClass->GetName());
+	ResultObj->SetStringField(TEXT("root_widget"), TEXT("RootCanvas"));
 	return ResultObj;
 }
 
@@ -541,4 +578,47 @@ TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetTextBlockBinding(const T
 	Response->SetBoolField(TEXT("success"), true);
 	Response->SetStringField(TEXT("binding_name"), BindingName);
 	return Response;
-} 
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPUMGCommands::HandleSetRootWidget(const TSharedPtr<FJsonObject>& Params)
+{
+	FString BlueprintName;
+	if (!Params->TryGetStringField(TEXT("blueprint_name"), BlueprintName))
+	{
+		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'blueprint_name' parameter"));
+	}
+
+	FString WidgetName;
+	if (!Params->TryGetStringField(TEXT("widget_name"), WidgetName))
+	{
+		return FUnrealMCPCommonUtils::CreateErrorResponse(TEXT("Missing 'widget_name' parameter"));
+	}
+
+	// Accept either a bare name (resolved under /Game/Widgets/) or a full asset path.
+	FString FullPath = BlueprintName;
+	if (!BlueprintName.StartsWith(TEXT("/")))
+	{
+		FullPath = TEXT("/Game/Widgets/") + BlueprintName;
+	}
+
+	UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(UEditorAssetLibrary::LoadAsset(FullPath));
+	if (!WidgetBlueprint)
+	{
+		return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget Blueprint '%s' not found"), *FullPath));
+	}
+
+	UWidget* Target = WidgetBlueprint->WidgetTree->FindWidget(FName(*WidgetName));
+	if (!Target)
+	{
+		return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Widget '%s' not found in tree"), *WidgetName));
+	}
+
+	WidgetBlueprint->WidgetTree->RootWidget = Target;
+	WidgetBlueprint->MarkPackageDirty();
+	FKismetEditorUtilities::CompileBlueprint(WidgetBlueprint);
+
+	TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+	ResultObj->SetBoolField(TEXT("success"), true);
+	ResultObj->SetStringField(TEXT("root_widget"), WidgetName);
+	return ResultObj;
+}

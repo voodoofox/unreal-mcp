@@ -35,6 +35,7 @@ Tools for inspecting assets, editing materials, and managing Nanite settings.
 | `connect_material_property` | Connect an expression to a material property (BaseColor, Normal, etc.) |
 | `disconnect_material_property` | Disconnect a material property input |
 | `set_material_expression_property` | Set a property on a material expression |
+| `add_custom_node_input` | Append a named input to a Custom HLSL node, preserving existing inputs and their connections |
 | `compile_material` | Recompile a material after edits |
 
 ## Skeleton

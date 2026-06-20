@@ -4,12 +4,12 @@ Tools for creating and manipulating UMG Widget Blueprints.
 
 ## create_umg_widget_blueprint
 
-Create a new UMG Widget Blueprint.
+Create a new UMG Widget Blueprint. Creates a real `UWidgetBlueprint` and auto-adds a Canvas Panel named `RootCanvas` as the root, so Python builders can find and add children to it. Returns `parent_class` and `root_widget` (`"RootCanvas"`).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `widget_name` | string | | Name of the widget blueprint |
-| `parent_class` | string | `UserWidget` | Parent class |
+| `parent_class` | string | `UserWidget` | Parent class — bare name, `U`-prefixed, or full object path (must be a `UserWidget` subclass) |
 | `path` | string | `/Game/UI` | Content browser path |
 
 ## add_text_block_to_widget
@@ -71,3 +71,12 @@ Set up a property binding for a Text Block.
 | `text_block_name` | string | | Text Block to bind |
 | `binding_property` | string | | Property to bind to |
 | `binding_type` | string | `Text` | Binding type (Text, Visibility, etc.) |
+
+## umg_set_root_widget
+
+Promote an existing widget (already present in the WidgetTree) to be the tree's Root Widget, then compile. Needed because `RootWidget` is a protected property that can't be set from Python. Returns `root_widget`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `blueprint_name` | string | | Widget Blueprint name (resolved under `/Game/Widgets/`) or full asset path |
+| `widget_name` | string | | Name of the widget already in the tree to make root |
